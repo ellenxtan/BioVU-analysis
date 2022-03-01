@@ -1,0 +1,2812 @@
+---
+title: "BRAIN-ICU data analysis"
+author: "Xiaoqing Ellen Tan"
+date: "2/3/2022"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    fig_height: 4
+    toc_float: true
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+library(dplyr)
+library(readxl)    # read xlsx
+library(lattice)   # histogram by group
+library(ggplot2)
+library(patchwork)
+library(gridExtra)
+library(corrplot)
+library(multgee)   # GEE multinominal logistic
+library(rms)       # spline (rms::rcs)
+library(nnet)      # multinominal logistic
+library(geepack)
+library(kableExtra)
+library(lme4)
+library(sjPlot)    # plot for mixed model (sjPlot::tab_model)
+library(tableone)
+library(survival)
+
+load("../data/brainmind_deid.Rdata")
+
+mtdna.data <- read_excel("../data/BRAIN.mtdna.data.R.xlsx") %>% 
+  mutate(id = as.integer(id),
+         study.day = as.integer(study.day))
+Hmisc::label(mtdna.data$id) <- "Patient ID"
+Hmisc::label(mtdna.data$study.day) <- "Study day"
+
+f2.data <- read_excel("../data/BRAIN.F2.data.R.xlsx") %>% 
+  mutate(id = as.integer(id),
+         study.day = as.integer(study.day))
+Hmisc::label(f2.data$id) <- "Patient ID"
+Hmisc::label(f2.data$study.day) <- "Study day"
+
+Hmisc::label(brainmind.fu$id) <- "Patient ID"
+
+# collapse factor levels
+brainmind.oneobs$iqcode.cat.e <- forcats::fct_collapse(brainmind.oneobs$iqcode.cat.e, 
+                      `Not impaired` = c("Not impaired","Not impaired (IQCODE < 3.3)"), 
+                      `Impaired` = c("Impaired","Impaired (IQCODE >= 3.3)"))
+```
+
+
+## Exploratory analysis
+
+### mtDNA descriptive
+
+(1) Histogram of mtDNA by days 1, 3, and 5. Mean, standard deviation, minimum and maximum by days. 
+(2) Box plot of mtDNA by days 1, 3, and 5. 
+(3) Identify potential outliers: ratio of the first two order statistics d(1)/d(2)>10. 
+
+```{r}
+myvar <- "mtdna"
+
+d1 <- mtdna.data %>% 
+  filter(study.day == 1)
+d3 <- mtdna.data %>% 
+  filter(study.day == 3)
+d5 <- mtdna.data %>% 
+  filter(study.day == 5)
+
+#### summary
+cat(paste0(myvar, " day 1\n"))
+summary(d1[[myvar]])
+
+cat(paste0(myvar, " day 3\n"))
+summary(d3[[myvar]])
+
+cat(paste0(myvar, " day 5\n"))
+summary(d5[[myvar]])
+
+#### histogram
+h1 <- d1 %>% 
+  ggplot(aes(x=!!as.symbol(myvar))) + 
+  geom_histogram(bins=100) +
+  ggtitle(paste0(myvar, " day 1"))
+
+h2 <- d3 %>% 
+  ggplot(aes(x=!!as.symbol(myvar))) + 
+  geom_histogram(bins=100) +
+  ggtitle(paste0(myvar, " day 3"))
+
+h3 <- d5 %>% 
+  ggplot(aes(x=!!as.symbol(myvar))) + 
+  geom_histogram(bins=100) +
+  ggtitle(paste0(myvar, " day 5"))
+
+grid.arrange(h1, h2, h3, ncol=3)
+
+#### boxplot
+mtdna.data %>% 
+  ggplot(aes(x=as.factor(study.day), y=!!as.symbol(myvar))) + 
+  geom_boxplot()
+```
+
+### Oxidative damage markers descriptive: F2-isoprostanes and isofurans
+
+(1) Histogram of those six measures by days 1, 3 and 5. Provide mean, standard deviation, min and max. 
+(2) The corresponding Box plots.
+(3) Correlation coefficients among those six measures (regardless of days).
+
+#### isop
+
+```{r}
+myvar <- "isop"
+
+d1 <- f2.data %>% 
+  filter(study.day == 1)
+d3 <- f2.data %>% 
+  filter(study.day == 3)
+d5 <- f2.data %>% 
+  filter(study.day == 5)
+
+#### summary
+cat(paste0(myvar, " day 1\n"))
+summary(d1[[myvar]])
+
+cat(paste0(myvar, " day 3\n"))
+summary(d3[[myvar]])
+
+cat(paste0(myvar, " day 5\n"))
+summary(d5[[myvar]])
+
+#### histogram
+h1 <- d1 %>% 
+  ggplot(aes(x=!!as.symbol(myvar))) + 
+  geom_histogram(bins=100) +
+  ggtitle(paste0(myvar, " day 1"))
+
+h2 <- d3 %>% 
+  ggplot(aes(x=!!as.symbol(myvar))) + 
+  geom_histogram(bins=100) +
+  ggtitle(paste0(myvar, " day 3"))
+
+h3 <- d5 %>% 
+  ggplot(aes(x=!!as.symbol(myvar))) + 
+  geom_histogram(bins=100) +
+  ggtitle(paste0(myvar, " day 5"))
+
+grid.arrange(h1, h2, h3, ncol=3)
+
+#### boxplot
+f2.data %>% 
+  ggplot(aes(x=as.factor(study.day), y=!!as.symbol(myvar))) + 
+  geom_boxplot()
+```
+
+
+### Correlation among mtDNA & markers (regardless of days) [2021-11-04]
+
+```{r}
+corrplot2 <- function(data,
+                      method = "pearson",
+                      sig.level = 0.05,
+                      order = "original",
+                      diag = FALSE,
+                      type = "upper",
+                      tl.srt = 90,
+                      number.font = 1,
+                      number.cex = 1,
+                      mar = c(0, 0, 0, 0)) {
+  # library(corrplot)
+  data_incomplete <- data
+  data <- data[complete.cases(data), ]
+  mat <- cor(data, method = method)
+  print("correlation matrix")
+  print(round(mat,3))
+  cor.mtest <- function(mat, method) {
+    mat <- as.matrix(mat)
+    n <- ncol(mat)
+    p.mat <- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+      for (j in (i + 1):n) {
+        tmp <- cor.test(mat[, i], mat[, j], method = method)
+        p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+      }
+    }
+    colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+    p.mat
+  }
+  p.mat <- cor.mtest(data, method = method)
+  print("corresponding p-values")
+  print(round(p.mat,3))
+  col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+  # corrplot(mat,
+  #   method = "color", col = col(200), number.font = number.font,
+  #   mar = mar, number.cex = number.cex,
+  #   type = type, order = order,
+  #   addCoef.col = "black", # add correlation coefficient
+  #   tl.col = "black", tl.srt = tl.srt, # rotation of text labels
+  #   # combine with significance level
+  #   p.mat = p.mat, sig.level = sig.level, insig = "blank",
+  #   # hide correlation coefficiens on the diagonal
+  #   diag = diag
+  # )
+}
+
+
+brainmind.daily %>% 
+  left_join(mtdna.data, by=c("id", "study.day")) %>% 
+  left_join(f2.data, by=c("id","study.day")) %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  distinct(id, study.day, .keep_all=TRUE) %>%  # 8 subjects have multiple records on 1 day
+  dplyr::select(mtdna, isop, isof, isop.qc, isof.qc, #isof.isop.ratio, isof.isop.ratio.qc,
+                il6.imp) %>% 
+  corrplot2(
+    method = "pearson",
+    sig.level = 0.05,
+    order = "original",
+    diag = FALSE,#TRUE, # 
+    type = "upper",#"full", #
+    tl.srt = 30
+  )
+```
+
+
+### Identify potential outliers for mtDNA / markers versus mental status / RBANS [2021-08-12]
+
+- Patient-level: group all subjects into two groups: 1) regular; 2) potential outliers
+- Ourlier definition: ratio between the first two order statistics of the marker d(1)/d(2)>10, or the maximum versus the median (if there are three values)
+
+- For daily mental status, do a frequency table between the outlier status (regular/potential) vs delirium status (normal/delirum/comatose) for each day (1/3/5)
+- For RBANS, run box plots of the 3-months RBANs and 12-month RBANs by outlier status
+
+
+#### mtDNA
+
+```{r}
+mtdna.data$is_outlier <- 0
+ids <- unique(mtdna.data$id)
+outlier_ids <- c()
+for (i in ids) {
+  tmp <- mtdna.data %>% 
+    filter(id == i)
+  
+  if (nrow(tmp) == 2) {
+    if (max(tmp$mtdna[1], tmp$mtdna[2]) / min(tmp$mtdna[1], tmp$mtdna[2]) > 10) {
+      outlier_ids <- c(outlier_ids, i)
+      mtdna.data[which(mtdna.data$id==i),]$is_outlier <- 1
+    }
+  } else if (nrow(tmp) == 3) {
+    if (max(tmp$mtdna) / median(tmp$mtdna) > 10) {
+      outlier_ids <- c(outlier_ids, i)
+      mtdna.data[which(mtdna.data$id==i),]$is_outlier <- 1
+    }
+  }
+}
+cat("ID of outliers:", outlier_ids, "\n")
+
+## Mental status
+tab_mental.marker <- brainmind.daily %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  dplyr::select(id, study.day, mental.stat.imp) %>% 
+  left_join(mtdna.data, by=c("id", "study.day")) %>% 
+  group_by(id) %>% 
+  mutate(is_outlier = mean(is_outlier, na.rm=T)) %>% 
+  ungroup()
+
+cat("========================\n")
+cat("Mental status\n")
+cat("Day 1:\n")
+with(tab_mental.marker %>% filter(study.day == 1), table(mental.stat.imp, is_outlier))
+summary(with(tab_mental.marker %>% filter(study.day == 1), table(mental.stat.imp, is_outlier)))
+cat("========================\n")
+cat("Day 3:\n")
+with(tab_mental.marker %>% filter(study.day == 3), table(mental.stat.imp, is_outlier))
+summary(with(tab_mental.marker %>% filter(study.day == 3), table(mental.stat.imp, is_outlier)))
+cat("========================\n")
+cat("Day 5:\n")
+with(tab_mental.marker %>% filter(study.day == 5), table(mental.stat.imp, is_outlier))
+summary(with(tab_mental.marker %>% filter(study.day == 5), table(mental.stat.imp, is_outlier)))
+
+
+## RBANS
+tab_rbans_marker <- brainmind.oneobs %>% 
+  left_join(brainmind.fu, by="id") %>% 
+  filter(ever.sevseptic.s == "Had severe sepsis in ICU") %>% 
+  filter(fu.period %in% c("3 Month", "12 Month")) %>% 
+  dplyr::select(id, fu.period, rbans.global.score) %>% 
+  left_join(mtdna.data %>% distinct(id, .keep_all=TRUE), by=c("id")) %>% 
+  dplyr::select(-study.day, -mtdna) %>% 
+  group_by(id) %>% 
+  mutate(is_outlier = mean(is_outlier, na.rm=T)) %>% 
+  ungroup()
+
+tab_rbans_marker %>% 
+  ggplot(aes(x=fu.period, y=rbans.global.score)) + 
+  geom_boxplot(aes(fill=is_outlier))
+
+# remove changes
+rm(tmp, outlier_ids, tab_mental.marker, tab_rbans_marker)
+# mtdna.data$is_outlier <- NULL
+```
+
+#### isop
+
+```{r}
+myvar <- "isop"
+
+f2.data$is_outlier <- 0
+ids <- unique(f2.data$id)
+outlier_ids <- c()
+for (i in ids) {
+  tmp <- f2.data %>% 
+    filter(id == i)
+  
+  if (nrow(tmp) == 2) {
+    if (max(tmp[[myvar]][1], tmp[[myvar]][2]) / min(tmp[[myvar]][1], tmp[[myvar]][2]) > 10) {
+      outlier_ids <- c(outlier_ids, i)
+      f2.data[which(f2.data$id==i),]$is_outlier <- 1
+    }
+  } else if (nrow(tmp) == 3) {
+    if (max(tmp[[myvar]]) / median(tmp[[myvar]]) > 10) {
+      outlier_ids <- c(outlier_ids, i)
+      f2.data[which(f2.data$id==i),]$is_outlier <- 1
+    }
+  }
+}
+cat("ID of outliers:", outlier_ids, "\n")
+
+tab_mental.marker <- brainmind.daily %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  dplyr::select(id, study.day, mental.stat.imp) %>% 
+  left_join(f2.data, by=c("id", "study.day")) %>% 
+  group_by(id) %>% 
+  mutate(is_outlier = mean(is_outlier, na.rm=T)) %>% 
+  ungroup()
+
+cat("========================\n")
+cat("Day 1:\n")
+with(tab_mental.marker %>% filter(study.day == 1), table(mental.stat.imp, is_outlier))
+summary(with(tab_mental.marker %>% filter(study.day == 1), table(mental.stat.imp, is_outlier)))
+cat("========================\n")
+cat("Day 3:\n")
+with(tab_mental.marker %>% filter(study.day == 3), table(mental.stat.imp, is_outlier))
+summary(with(tab_mental.marker %>% filter(study.day == 3), table(mental.stat.imp, is_outlier)))
+cat("========================\n")
+cat("Day 5:\n")
+with(tab_mental.marker %>% filter(study.day == 5), table(mental.stat.imp, is_outlier))
+summary(with(tab_mental.marker %>% filter(study.day == 5), table(mental.stat.imp, is_outlier)))
+
+# remove changes
+rm(tmp, outlier_ids, tab_mental.marker)
+f2.data$is_outlier <- NULL
+```
+
+
+## Biomarkers over time
+
+```{r}
+# daily-level data
+daily.dat <- brainmind.daily %>% 
+  left_join(brainmind.oneobs, by="id") %>% 
+  left_join(mtdna.data, by=c("id", "study.day")) %>% 
+  left_join(f2.data, by=c("id","study.day")) %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  distinct(id, study.day, .keep_all=TRUE) %>%  # 8 subjects have multiple records on 1 day
+  mutate(mental.stat.num = case_when(mental.stat.imp=="Delirious" ~ 1,
+                                     mental.stat.imp=="Comatose" ~ 2,
+                                     mental.stat.imp=="Normal" ~ 3),
+         mental.stat.num = as.integer(mental.stat.num)) %>% 
+  dplyr::select(id, study.day, mental.stat.num, mental.stat.imp, is_outlier,
+                mtdna, isop, isof, isop.qc, isof.qc, isof.isop.ratio, isof.isop.ratio.qc,
+                age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod,
+                il6.imp, sofa, race.wb
+                ) %>% 
+  group_by(id) %>% 
+  mutate(is_outlier = mean(is_outlier, na.rm=T)) %>% 
+  ungroup()
+
+# daily.dat %>% 
+#   dplyr::select(mental.stat.num, mental.stat.imp)
+# range(daily.dat$age.enroll)
+# table(daily.dat$sex.pp)
+# table(daily.dat$charlson.score)
+# table(daily.dat$iqcode.cat.e)
+# table(daily.dat$sofa.mod)
+# table(daily.dat$mental.stat)
+# table(daily.dat$mental.stat.imp)
+```
+
+
+### Trajectory analysis on biomarkers over time [2021-09-30]
+
+We would like to model the change of markers over time (day 1, 3 and 5).
+Baseline characteristics can be included as predictors for the marker (e.g., Isop). We may model the trajectory as a quadratic function of time (or day). You may plot individual trajectories and get an idea. The number of groups may be adjusted and see which leads to a better grouping of the study subjects. Usually we want to settle between 2, 3 and 4.
+
+If we are lucky, the data may identify a few trajectories. Then we may predict the membership of each subject by the fitted model.
+Then calculate the percentages of normal/delirium/comatose on days 1/3/5 within each “predicted group”.
+This will provide some exploratory explanation on the longitudinal association between a marker (e.g., Isop) and the outcome of interest (normal/delirium/comatose).
+
+<!-- ![](results/plt_traj/sigma_by_group/traj_mtdna.png){width=70% height=350} -->
+<!-- ![](results/plt_traj/sigma_by_group/traj_isop.png){width=70% height=350} -->
+
+
+---
+
+
+<details>
+  <summary>Model fitting in trajectory analysis (STATA output)</summary>
+
+```{r engine='bash', comment=''}
+cat ./results/plt_traj/sigma_by_group/log_traj_sigma_by_group.log
+```
+
+</details>
+
+
+---
+
+
+```{r, results='asis'}
+# wide format for running TRAJ in STATA
+daily.dat.wide <- daily.dat %>%
+  dplyr::select(-il6.imp) %>% 
+  tidyr::pivot_wider(names_from=study.day,
+                     values_from=c("mental.stat.num", "mental.stat.imp",
+                                   "mtdna", "isop", "isof",
+                                   "isop.qc", "isof.qc",
+                                   "isof.isop.ratio", "isof.isop.ratio.qc")) %>%
+  mutate(day_1 = 1,
+         day_3 = 3,
+         day_5 = 5)
+# remove dot in names for STATA format
+names(daily.dat.wide) <- gsub("\\.", "", names(daily.dat.wide))
+
+# save as STATA data
+# haven::write_dta(daily.dat.wide, path="daily_wide_20210902.dta")
+# run STATA do file: daily_wide_traj.do
+
+traj_res <- haven::read_dta("daily_wide_traj_20210909.dta") %>% 
+  dplyr::select(id, starts_with("grp_")) %>% 
+  mutate(id = as.integer(id))
+Hmisc::label(traj_res$id) <- "Patient ID"
+
+daily_traj <- daily.dat %>% 
+  left_join(traj_res, by="id")
+
+
+## mtdna all subjects
+daily_traj %>% 
+  dplyr::select(id, study.day, mental.stat.imp, mtdna, grp_mtdna) %>% 
+  group_by(id) %>% 
+  filter(!any(is.na(mtdna))) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = as.numeric(as.character((study.day))), y = mtdna)) + geom_line() +
+  facet_wrap(~id, scales = "free") +
+  ggtitle("Trajectory of mtDNA among all subjects") -> g
+# print(g)
+# ggsave("results/plt_traj/sigma_by_group/traj_mtdna_y0_100.png", plot=g, width=20, height=20)
+
+
+## isop all subjects
+daily_traj %>% 
+  dplyr::select(id, study.day, mental.stat.imp, isop, grp_isop) %>% 
+  group_by(id) %>% 
+  filter(!any(is.na(isop))) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = as.numeric(as.character((study.day))), y = isop)) + geom_line() +
+  facet_wrap(~id, scales = "free") +
+  ggtitle("Trajectory of isop among all subjects") -> g
+# print(g)
+# ggsave("results/plt_traj/sigma_by_group/traj_isop_y0_100.png", plot=g, width=20, height=20)
+
+
+markers <- c("mtdna", "isop") #, "isof", "isop_qc", "isof_qc", "isof_isop_ratio", "isof_isop_ratio_qc"
+tab_all <- c()
+for (marker in markers) {
+  marker_name <- paste0("grp_",marker)
+  for (grp in c(1,2)) {
+    for (day in c(1,3,5)) {
+      tmp <- daily_traj %>% 
+        filter(!!as.symbol(marker_name)==grp & study.day==day)
+      
+      tab1 <- prop.table(table(tmp[["mental.stat.imp"]], tmp[[marker_name]])) %>% 
+        as.matrix() %>% 
+        t() %>% 
+        as.data.frame.matrix() %>% 
+        mutate(x = marker,
+               study.day = day,
+               traj.group = grp) %>% 
+        dplyr::select(x, traj.group, study.day, Delirious, Comatose, Normal)
+      
+      tab2 <- table(tmp[["mental.stat.imp"]], tmp[[marker_name]]) %>% 
+        as.matrix() %>% 
+        t() %>% 
+        as.data.frame.matrix() %>% 
+        rename(Delirious_cnt = Delirious,
+               Comatose_cnt = Comatose,
+               Normal_cnt = Normal) %>% 
+        dplyr::select(Delirious_cnt, Comatose_cnt, Normal_cnt)
+      
+      tab <- cbind(tab1, tab2)
+      tab_all <- rbind(tab_all, tab)
+    }
+  }
+}
+
+
+for (marker in markers) {
+  marker_name <- paste0("grp_",marker)
+  cat(marker, "table of group members:\n")
+  table(traj_res[[marker_name]]) %>% 
+    kable(caption="") %>% 
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width =  F) %>% 
+    print()
+  
+  # plts
+  plt_grps <- list()
+  for (grp in c(1,2)) {
+    tab_all %>% 
+      filter(x == marker & traj.group==grp) %>% 
+      ggplot(aes(x=study.day)) +
+      geom_line(aes(y=Delirious, color="delirium")) +
+      geom_line(aes(y=Comatose, color="comatose")) +
+      geom_line(aes(y=Normal, color="normal")) +
+      scale_colour_manual(paste0("Group ",grp),
+                          breaks = c("delirium","comatose","normal"),
+                          values = c("red","green","blue")) +
+      theme(legend.position="top") +
+      xlab(marker) +
+      ylab("probability") +
+      ylim(0.1, 0.6) +
+      scale_x_continuous(limits=c(1,5), breaks=c(1,3,5)) -> plt_grps[[grp]]
+  }
+  g <- plt_grps[[1]] | plt_grps[[2]]
+  print(g)
+  
+  # tabs
+  tab_all %>% 
+    filter(x == marker) %>% 
+    kable(caption=paste0("Table for ",marker), digits=3) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width =  F) %>% 
+    print()
+  
+}
+```
+
+
+<!-- ![](results/plt_traj/sigma_by_group/traj_mtdna.png){width=100% height=1000} -->
+
+<!-- ![](results/plt_traj/sigma_by_group/traj_isop.png){width=100% height=1000} -->
+
+
+### Trajectory analysis on biomarkers over time with only sex and sofa [2022-01-27]
+
+Include only sex and sofa in the trajectory model.
+
+---
+
+
+<details>
+  <summary>Model fitting in trajectory analysis (STATA output)</summary>
+
+```{r engine='bash', comment=''}
+cat ./results/plt_traj/sigma_by_group/log_traj_sigma_by_group_20211111.log
+```
+
+</details>
+
+
+---
+
+![](results/plt_traj/sigma_by_group/traj_mtdna_20211111.png){width=70% height=350}
+
+![](results/plt_traj/sigma_by_group/traj_isop_20211111.png){width=70% height=350}
+
+
+```{r, results='asis'}
+# wide format for running TRAJ in STATA
+daily.dat.wide <- daily.dat %>%
+  dplyr::select(-il6.imp) %>% 
+  tidyr::pivot_wider(names_from=study.day,
+                     values_from=c("mental.stat.num", "mental.stat.imp",
+                                   "mtdna", "isop", "isof",
+                                   "isop.qc", "isof.qc",
+                                   "isof.isop.ratio", "isof.isop.ratio.qc"
+                                   )) %>%
+  mutate(day_1 = 1,
+         day_3 = 3,
+         day_5 = 5)
+# remove dot in names for STATA format
+names(daily.dat.wide) <- gsub("\\.", "", names(daily.dat.wide))
+
+## save as STATA data
+# haven::write_dta(daily.dat.wide, path="daily_wide_20211111.dta")
+## run STATA do file: daily_wide_traj.do
+
+traj_res <- haven::read_dta("daily_wide_traj_20211111.dta") %>% 
+  dplyr::select(id, starts_with("grp_")) %>% 
+  mutate(id = as.integer(id))
+Hmisc::label(traj_res$id) <- "Patient ID"
+
+daily_traj <- daily.dat %>% 
+  left_join(traj_res, by="id")
+
+table(traj_res$grp_mtdna, traj_res$grp_isop) %>% 
+  kable(caption=paste0("mtDNA group vs. isop group"), digits=3) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = T) %>% 
+  print()
+
+
+markers <- c("mtdna", "isop") #, "isof", "isop_qc", "isof_qc", "isof_isop_ratio", "isof_isop_ratio_qc"
+tab_all <- c()
+for (marker in markers) {
+  marker_name <- paste0("grp_",marker)
+  for (grp in c(1,2)) {
+    for (day in c(1,3,5)) {
+      tmp <- daily_traj %>% 
+        filter(!!as.symbol(marker_name)==grp & study.day==day)
+      
+      tab1 <- prop.table(table(tmp[["mental.stat.imp"]], tmp[[marker_name]])) %>% 
+        as.matrix() %>% 
+        t() %>% 
+        as.data.frame.matrix() %>% 
+        mutate(x = marker,
+               study.day = day,
+               traj.group = grp) %>% 
+        dplyr::select(x, traj.group, study.day, Delirious, Comatose, Normal)
+      
+      tab2 <- table(tmp[["mental.stat.imp"]], tmp[[marker_name]]) %>% 
+        as.matrix() %>% 
+        t() %>% 
+        as.data.frame.matrix() %>% 
+        rename(Delirious_cnt = Delirious,
+               Comatose_cnt = Comatose,
+               Normal_cnt = Normal) %>% 
+        dplyr::select(Delirious_cnt, Comatose_cnt, Normal_cnt)
+      
+      tab <- cbind(tab1, tab2)
+      tab_all <- rbind(tab_all, tab)
+    }
+  }
+}
+
+
+for (marker in markers) {
+  marker_name <- paste0("grp_",marker)
+  cat(marker, "table of group members:\n")
+  table(traj_res[[marker_name]]) %>% 
+    kable(caption="") %>% 
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width =  F) %>% 
+    print()
+  
+  # plts
+  plt_grps <- list()
+  for (grp in c(1,2)) {
+    tab_all %>% 
+      filter(x == marker & traj.group==grp) %>% 
+      ggplot(aes(x=study.day)) +
+      geom_line(aes(y=Delirious, color="delirium")) +
+      geom_line(aes(y=Comatose, color="comatose")) +
+      geom_line(aes(y=Normal, color="normal")) +
+      scale_colour_manual(paste0("Group ",grp),
+                          breaks = c("delirium","comatose","normal"),
+                          values = c("red","green","blue")) +
+      theme(legend.position="top") +
+      xlab(marker) +
+      ylab("probability") +
+      ylim(0.1, 0.6) +
+      scale_x_continuous(limits=c(1,5), breaks=c(1,3,5)) -> plt_grps[[grp]]
+  }
+  g <- plt_grps[[1]] | plt_grps[[2]]
+  print(g)
+  
+  # tabs
+  tab_all %>% 
+    filter(x == marker) %>% 
+    kable(caption=paste0("Table for ",marker), digits=3) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width =  F) %>% 
+    print()
+  
+}
+```
+
+Sankey diagram.
+
+```{r}
+library(ggsankey)
+
+daily_traj_wide <- daily.dat.wide %>% 
+  dplyr::select(id, mentalstatimp_1,mentalstatimp_3,mentalstatimp_5) %>% 
+  left_join(traj_res, by="id") %>% 
+  na.omit() %>% 
+  rename(`Day 1`=mentalstatimp_1,`Day 3`=mentalstatimp_3,`Day 5`=mentalstatimp_5)
+
+daily_traj_wide %>% 
+  filter(grp_mtdna==1) %>% 
+  make_long(`Day 1`,`Day 3`,`Day 5`) %>% 
+  ggplot(aes(x=x, next_x=next_x, node=node, next_node=next_node, fill=factor(node), label=node)) +
+  geom_sankey(flow.alpha = 1,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  scale_fill_viridis_d() +
+  theme_sankey(base_size = 18) +
+  labs(x = NULL) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5)) +
+  ggtitle("mtdna group 1") -> g1
+
+daily_traj_wide %>% 
+  filter(grp_mtdna==2) %>% 
+  make_long(`Day 1`,`Day 3`,`Day 5`) %>% 
+  ggplot(aes(x=x, next_x=next_x, node=node, next_node=next_node, fill=factor(node), label=node)) +
+  geom_sankey(flow.alpha = 1,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  scale_fill_viridis_d() +
+  theme_sankey(base_size = 18) +
+  labs(x = NULL) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5)) +
+  ggtitle("mtdna group 2") -> g2
+
+ggpubr::ggarrange(g1, g2, ncol=2)
+
+daily_traj_wide %>% 
+  filter(grp_isop==1) %>% 
+  make_long(`Day 1`,`Day 3`,`Day 5`) %>% 
+  ggplot(aes(x=x, next_x=next_x, node=node, next_node=next_node, fill=factor(node), label=node)) +
+  geom_sankey(flow.alpha = 1,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  scale_fill_viridis_d() +
+  theme_sankey(base_size = 18) +
+  labs(x = NULL) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5)) +
+  ggtitle("isop group 1") -> g1
+
+daily_traj_wide %>% 
+  filter(grp_isop==2) %>% 
+  make_long(`Day 1`,`Day 3`,`Day 5`) %>% 
+  ggplot(aes(x=x, next_x=next_x, node=node, next_node=next_node, fill=factor(node), label=node)) +
+  geom_sankey(flow.alpha = 1,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  scale_fill_viridis_d() +
+  theme_sankey(base_size = 18) +
+  labs(x = NULL) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5)) +
+  ggtitle("isop group 2") -> g2
+
+ggpubr::ggarrange(g1, g2, ncol=2)
+```
+
+
+### Trajectory of biomarkers over time vs. 3-month RBANS [2021-10-28]
+
+```{r}
+# https://stackoverflow.com/questions/66773275/how-do-i-add-formatted-text-with-a-variable-to-a-ggplot-that-is-facet-wrapped
+
+#rbans 3-month
+rbans_tmp <- brainmind.oneobs %>% 
+  left_join(brainmind.fu, by="id") %>% 
+  filter(ever.sevseptic.s == "Had severe sepsis in ICU") %>% 
+  filter(fu.period %in% c("3 Month")) %>%  #, "12 Month"
+  dplyr::select(id, fu.period, rbans.global.score) %>% 
+  na.omit() %>% 
+  arrange(rbans.global.score)
+rbans_tmp$rbans.rank = seq(1,nrow(rbans_tmp))
+
+#mtdna
+mtdna_tmp <- daily.dat %>% 
+  dplyr::select(id, study.day, mtdna) %>% 
+  group_by(id) %>% 
+  filter(!all(is.na(mtdna))) %>% 
+  ungroup()
+mtdna_rbans_tmp <- rbans_tmp %>% 
+  left_join(mtdna_tmp, by="id") %>% 
+  filter(!is.na(study.day))
+rbans_tmp1 <- mtdna_rbans_tmp %>% 
+  distinct(rbans.rank, rbans.global.score)
+
+hist(rbans_tmp1$rbans.global.score)
+
+# length(unique(mtdna_rbans_tmp$rbans.rank)) # 184
+mtdna_rbans_tmp %>% 
+  ggplot(aes(x = as.numeric(as.character((study.day))), y = mtdna)) + 
+  geom_point() +
+  geom_line() +
+  facet_wrap(vars(rbans.rank)) +
+  coord_cartesian(ylim = c(0, 20)) +
+  geom_text(
+    data = rbans_tmp1,
+    aes(
+      x = -Inf,
+      y = Inf,
+      label = paste0("RBANS", "==", rbans.global.score)
+    ),
+    parse = TRUE,
+    hjust = 0,
+    vjust = 1
+  ) +
+  ggtitle("Trajectory of mtDNA among all subjects with a 3-month RBANS") -> g
+# print(g)
+# ggsave("results/plt_traj/traj_mtdna_rbans_y0_20.png", plot=g, width=20, height=20)
+
+
+
+#isop
+isop_tmp <- daily.dat %>% 
+  dplyr::select(id, study.day, isop) %>% 
+  group_by(id) %>% 
+  filter(!all(is.na(isop))) %>% 
+  ungroup()
+isop_rbans_tmp <- rbans_tmp %>% 
+  left_join(isop_tmp, by="id") %>% 
+  filter(!is.na(study.day))
+rbans_tmp2 <- isop_rbans_tmp %>% 
+  distinct(rbans.rank, rbans.global.score)
+
+# length(unique(isop_rbans_tmp$rbans.rank)) # 183
+isop_rbans_tmp %>% 
+  ggplot(aes(x = as.numeric(as.character((study.day))), y = isop)) + 
+  geom_point() +
+  geom_line() +
+  facet_wrap(vars(rbans.rank)) +
+  coord_cartesian(ylim = c(0, 100)) +
+  geom_text(
+    data = rbans_tmp2,
+    aes(
+      x = -Inf,
+      y = Inf,
+      label = paste0("RBANS", "==", rbans.global.score)
+    ),
+    parse = TRUE,
+    hjust = 0,
+    vjust = 1
+  ) +
+  ggtitle("Trajectory of isop among all subjects with a 3-month RBANS") -> g
+# print(g)
+# ggsave("results/plt_traj/traj_isop_rbans_y0_100.png", plot=g, width=20, height=20)
+```
+
+
+
+### Mixed models on biomarkers over time [2021-10-21]
+
+Note: The marginal R-squared considers only the variance of the fixed effects, while the conditional R-squared takes both the fixed and random effects into account.
+
+```{r}
+# random effect modeling
+# https://cran.r-project.org/web/packages/lme4/vignettes/lmer.pdf
+
+# I(study.day^2)=poly(study.day,2, raw=TRUE) vs. poly(study.day,2, raw=FALSE)
+# https://stats.stackexchange.com/questions/396144/how-to-code-random-slopes-random-intercept-model-with-quadratic-term-and-covaria
+# model <- lmer(isop ~ poly(study.day,2, raw=FALSE) + 
+#                        (1 + poly(study.day,2, raw=FALSE)|id),
+#                        data = daily.dat, REML = TRUE)
+
+cat("isop:\n")
+# correlated random intercept and slope (use |; not correlated use ||)
+fit1 <- lmer(isop ~ study.day + I(study.day^2) + (study.day|id), data = daily.dat)
+# w/o quadratic time
+fit2 <- lmer(isop ~ study.day + (study.day|id), data = daily.dat)
+tab_model(fit1, fit2)
+anova(fit1, fit2)
+
+cat("mtdna:\n")
+fit1 <- lmer(mtdna ~ study.day + I(study.day^2) + (study.day|id), data = daily.dat)
+fit2 <- lmer(mtdna ~ study.day + (study.day|id), data = daily.dat)
+tab_model(fit1, fit2)
+anova(fit1, fit2)
+
+cat("mtdna w/o outliers:\n")
+fit1 <- lmer(mtdna ~ study.day + I(study.day^2) + (study.day|id), data = daily.dat %>% filter(is_outlier==0))
+fit2 <- lmer(mtdna ~ study.day + (study.day|id), data = daily.dat %>% filter(is_outlier==0))
+tab_model(fit1, fit2)
+anova(fit1, fit2)
+```
+
+
+## Model 1 (mtDNA / markers and mental status)
+
+- Hypothesis: Elevations in F2-isoprostane (F2-IsoP) are associated with increased delirium during sepsis.
+- Unit of observation: Study day (beginning on day of enrollment and ending at hospital discharge, death, or censored at day 30)
+- Exposure: F2-IsoP concentrations (measured on study days 1, 3, and 5)
+- Outcome: Delirium (`1` in output) vs. coma (`2` in output) vs. normal mental state (normal is the reference)
+- Covariates: (a) age, (b) gender, (c) Charlson comorbidity index, (d) Short IQCODE, (e) modified SOFA score, (f) study day
+- Model: Multinomial logistic regression (GEE)
+
+- Plots for marker value & predicted multinomial probabilities
+  - For each marker, generate a plot: the x-axis will be the marker value (range from either minimum or maximum or 10th percentile to the 90th percentile), the y-axis would be the predicted multinomial probabilities for (normal, delirium and comatose, in three differently-colored bands with summation to 1). 
+  - There will be six figures for each marker, following the combination of gender (M/F) and Day (1/3/5). The values of the other covariates will be fixed at their medium (age/sofa/charlson score). "iqcode.cat.e" is discrete, you may just fix it at its medium level. An alternative is to use the continuous score “iqcode.score.e” in the regression models. 
+
+
+### Univariate analysis [2021-08-12]
+
+- Try univariate analysis and check out the functional form of continuous variables. Restricted cubic splines is used with df=3 or 4.
+  - GEE nominal multinominal logistic regression of outcome ~ exposure (isop).
+  - Multinominal logistic regression of outcome ~ baseline covariate.
+  
+```{r}
+# daily-level covariates
+markers <- c("mtdna", "isop", "il6.imp") #, "isof", "isop.qc", "isof.qc", "isof.isop.ratio", "isof.isop.ratio.qc"
+
+for (marker in markers) {
+  cat(marker, ":\n")
+  fml <- as.formula(paste("mental.stat.num ~ rcs(", marker, ", 3) + factor(study.day)"))
+  # outcome categories 1,...,J (J is reference group - normal)
+  uni.fit <- nomLORgee(formula = fml, data = daily.dat, id = id) # df=4 not sig
+  smry <- summary(uni.fit)
+  print(smry$coefficients)
+  cat("========================\n")
+}
+
+
+# patient-level covariates
+pat.dat <- daily.dat %>% 
+  distinct(id, .keep_all=TRUE) %>% 
+  mutate(mental.stat.imp = relevel(mental.stat.imp, ref="Normal"))  # Normal is ref
+
+cat("age.enroll:\n")
+uni.fit <- multinom(mental.stat.imp ~ rcs(age.enroll, 3), data = pat.dat)
+# summary(uni.fit)
+z <- summary(uni.fit)$coefficients/summary(uni.fit)$standard.errors
+p <- (1 - pnorm(abs(z), 0, 1)) * 2
+cat("Two-sided p-values:\n")
+p[,-1]
+cat("========================\n")
+
+cat("charlson.score:\n")
+uni.fit <- multinom(mental.stat.imp ~ rcs(charlson.score, 3), data = pat.dat)
+# summary(uni.fit)
+z <- summary(uni.fit)$coefficients/summary(uni.fit)$standard.errors
+p <- (1 - pnorm(abs(z), 0, 1)) * 2
+cat("Two-sided p-values:\n")
+p[,-1]
+cat("========================\n")
+
+cat("sofa.mod:\n")
+uni.fit <- multinom(mental.stat.imp ~ rcs(sofa.mod, 3), data = pat.dat)
+# summary(uni.fit)
+z <- summary(uni.fit)$coefficients/summary(uni.fit)$standard.errors
+p <- (1 - pnorm(abs(z), 0, 1)) * 2
+cat("Two-sided p-values:\n")
+p[,-1]
+cat("========================\n")
+```
+
+
+### Multivariate analysis [2021-12-16]
+
+- Apply suitable functional form for exposure as well as covariates.
+  - Except isop using restricted cubic spline, other markers and covariates take a linear form.
+  
+- Plots for predicted GEE probabilities & 95% bootstrap CI bands
+  - In those plots, the x-axis will be the marker value (range from 10th percentile to the 90th percentile), the y-axis would be the predicted multinomial probabilities for (normal, delirium and comatose, in three differently-colored bands with summation to 1). 
+    - For mtDNA, majority of the values vary from 0 to about 15, the range of the x-axis needs to reflect where data are concentrated. Suggest using 10th percentile to 90th percentile. The same goes with other markers, such as “isop” (mostly 0 to 150).
+  - There will be six figures for each marker, following the combination of gender (M/F) and Day (1/3/5). The values of the other covariates will be fixed at their medium (age/sofa/charlson score). "iqcode.cat.e" is discrete, fix it at one level. 
+  - Also plot the 95% bootstrap confidence bands for the fitted models. Because three curves will be plotted with their confidence bands, we will have to present them in three separate plots side by side. This may takes time to run. 
+    - As we work with the normalized predicted probabilities, a normal approximation is not suitable. We can either use 200 bootstrap samples and the percentiles for the CI or transformed (complementary log-log) CI from a normal CI.
+  - For mtDNA, there are two sets of analyses: (a) keep all subjects; (b) remove the potential outliers.
+
+- Include IL6 into Isop model.
+
+```{r}
+# function to get mode
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# samples a number of groups in a previously grouped_by tibble
+# https://rdrr.io/github/HSPS-DataScience/HSPSUtils/src/R/sample_n_groups.R
+sample_n_groups <- function(tbl, size, replace = FALSE, weight = NULL) {
+  # regroup when done
+  grps <- tbl %>%
+    groups() %>%
+    lapply(as.character) %>%
+    unlist()
+  # check length of groups non-zero
+  keep <- tbl %>%
+    summarise() %>%
+    ungroup() %>%
+    sample_n(size, replace, weight)
+  # keep only selected groups, regroup because joins change count.
+  # regrouping may be unnecessary but joins do something funky to grouping variable
+  tbl %>%
+    right_join(keep, by = grps) %>%
+    group_by(.dots = grps)
+}
+
+################################################################################
+
+## tune
+is_boot <- FALSE#TRUE#
+
+## bootstrap: patient-level resample
+if (is_boot) {
+  B <- 200
+  n_pats <- length(unique(daily.dat$id))  # 1040pats*3days == 3120records = nrow(daily.dat)
+  n_pats.no.outlier <- daily.dat %>% 
+    filter(is_outlier == 0) %>% 
+    dplyr::select(id) %>% 
+    unique() %>% 
+    nrow()
+  boot.dats.all <- list()
+  boot.dats.no.outlier <- list()
+  for (b in 1:B) {
+    ## all pats (for mtDNA & markers)
+    set.seed(b)
+    boot.dats.all[[b]] <- daily.dat %>% 
+      group_by(id) %>% 
+      sample_n_groups(n_pats, replace=T) %>% 
+      ungroup() %>% 
+      arrange(study.day) %>% 
+      mutate(id = rep(seq(1, n_pats), times=3)) %>%  # new id because duplicates
+      arrange(id, study.day) %>% 
+      relocate(id)  # move this col to front
+    
+    ## pats w/o outliers (for mtDNA-no-outlier only)
+    set.seed(b)
+    boot.dats.no.outlier[[b]] <- daily.dat %>% 
+      filter(is_outlier == 0) %>%  # remove outliers
+      group_by(id) %>% 
+      sample_n_groups(n_pats.no.outlier, replace=T) %>% 
+      ungroup() %>% 
+      arrange(study.day) %>% 
+      mutate(id = rep(seq(1, n_pats.no.outlier), times=3)) %>%
+      arrange(id, study.day) %>% 
+      relocate(id)
+  }
+}
+
+
+################################################################################
+
+## wrapper for predict nomLORgee
+PredLORgeeInner <- function(use.dat, marker, dat.pred, is.print) {
+  if (marker == "isop") { # only rcs(isop) is sig.
+    fml <- as.formula(paste("mental.stat.num ~ rcs(", marker, ", 3) + factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod"))
+  } else {
+    fml <- as.formula(paste("mental.stat.num ~ ", marker, " + factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod"))
+  }
+  
+  use.dat1 <- use.dat %>% 
+    na.omit()
+  
+  # outcome categories 1,...,J (J is reference group - normal)
+  mul.fit <- nomLORgee(formula = fml, data = use.dat1, id = id)
+  smry <- summary(mul.fit)
+  if (is.print) {
+    print(smry$coefficients)
+  }
+  
+  fml0 <- as.formula("mental.stat.num ~ factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod")
+  mul.fit0 <- update(mul.fit, formula = fml0)
+  if (is.print) {
+    cat("Global Wald Test of Nested GEE Models for marker terms\n")
+    print(waldts(mul.fit, mul.fit0))
+  }
+  
+  ## predict prob log(OR)=Xb
+  # design matrix
+  if (marker == "isop") { # obtain knot locations & design matrix for rcs
+    knot.loc <- rcspline.eval(use.dat[[marker]], nk=3, knots.only=TRUE)
+    X <- model.matrix( ~ rcspline.eval(exposure, knots=knot.loc, inclx=TRUE) + 
+                         factor(study.day) +
+                         age.enroll + sex.pp + charlson.score +
+                         iqcode.cat.e + sofa.mod, dat.pred)
+  } else {
+    X <- model.matrix( ~., dat.pred)
+  }
+  
+  # coef
+  coef <- mul.fit$coefficients
+  coef_1 <- coef[1:(length(mul.fit$coefficients)/2)]
+  coef_2 <- coef[(length(mul.fit$coefficients)/2+1):length(mul.fit$coefficients)]
+  
+  or_1 <- exp(X %*% coef_1)  # delirious vs. normal
+  or_2 <- exp(X %*% coef_2)  # coma vs. normal
+  
+  pred.out <- as.data.frame(cbind(1, or_1, or_2))
+  names(pred.out) <- c("pr_normal", "pr_delirium", "pr_coma")
+  pred.out <- pred.out %>% 
+    mutate(pr_sum = pr_normal + pr_delirium + pr_coma,
+           pr_normal = pr_normal / pr_sum,
+           pr_delirium = pr_delirium / pr_sum,
+           pr_coma = pr_coma / pr_sum,
+           pr_deli_norm = pr_delirium / pr_normal) %>% 
+    dplyr::select(-pr_sum)
+  
+  # create scenario id from group_by
+  plt.mat <- cbind(dat.pred, pred.out) %>% 
+    group_by(study.day, age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod) %>% 
+    { mutate(ungroup(.), scenario = group_indices(.)) } %>% 
+    dplyr::select(exposure, scenario, pr_normal, pr_delirium, pr_coma, pr_deli_norm)
+  
+  return(plt.mat)
+}
+
+################################################################################
+############################### Main program ###################################
+################################################################################
+
+markers <- c("mtdna", "isop") #, "mtdna-no-outliers", "isof", "isop.qc", "isof.qc", "isof.isop.ratio", "isof.isop.ratio.qc"
+
+for (marker in markers) {
+  # marker <- "mtdna"
+  cat(marker, ":\n")
+  
+  # two analysis for mtDNA
+  marker.out <- marker
+  if (marker == "mtdna-no-outliers") {
+    use.dat <- daily.dat %>% 
+      filter(is_outlier == 0)  # remove outliers
+    if (is_boot) {
+      boot.dats <- boot.dats.no.outlier
+    }
+    marker <- "mtdna"
+    
+  } else {
+    use.dat <- daily.dat
+    if (is_boot) {
+      boot.dats <- boot.dats.all
+    }
+  }
+  
+  # data for prediction
+  dat.pred <- expand.grid(exposure=seq(quantile(use.dat[[marker]],probs=0.1,na.rm=T), 
+                                       quantile(use.dat[[marker]],probs=0.9,na.rm=T),
+                                       length.out=200),
+                          study.day=unique(use.dat$study.day), 
+                          age.enroll=median(use.dat$age.enroll),
+                          sex.pp=unique(use.dat$sex.pp), 
+                          charlson.score=median(use.dat$charlson.score),
+                          iqcode.cat.e=getmode(use.dat$iqcode.cat.e),
+                          sofa.mod=median(use.dat$sofa.mod)
+                          ) %>% 
+    mutate(study.day = factor(study.day),
+           sex.pp = factor(sex.pp, levels=levels(use.dat$sex.pp)),
+           iqcode.cat.e = factor(iqcode.cat.e, levels=levels(use.dat$iqcode.cat.e))
+           )
+  
+  # data estimate
+  data.plt.mat <- PredLORgeeInner(use.dat=use.dat, marker=marker, 
+                                  dat.pred=dat.pred, is.print=TRUE)
+  
+  # data estimate (isop with il6.imp)
+  if (marker == "isop") { # only rcs(isop) is sig.
+    fml1 <- as.formula(paste("mental.stat.num ~ rcs(", marker, ", 3) + 
+                      rcs(il6.imp,3) +
+                      factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod"))
+    fml2 <- as.formula(paste("mental.stat.num ~  
+                      rcs(il6.imp,3) +
+                      factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod"))
+    use.dat1 <- use.dat %>% 
+      na.omit()
+    print("isop + il6")
+    mul.fit <- nomLORgee(formula = fml1, data = use.dat1, id = id)
+    smry <- summary(mul.fit)
+    print(smry$coefficients)
+    
+    print("il6 alone")
+    mul.fit <- nomLORgee(formula = fml2, data = use.dat1, id = id)
+    smry <- summary(mul.fit)
+    print(smry$coefficients)
+  }
+  
+  
+  # boot estimate
+  if (is_boot) {
+    boot.plt.mats <- lapply(boot.dats, function(boot.dat, marker, dat.pred) {
+      PredLORgeeInner(use.dat=boot.dat, marker=marker, 
+                      dat.pred=dat.pred, is.print=FALSE)
+    }, marker=marker, dat.pred=dat.pred)
+    
+    # # check all columns of a are identical
+    # a <- bind_cols(lapply(boot.plt.mats, "[", "exposure"))
+    # stopifnot(length(unique(as.list(a))) == 1)
+    
+    pr_normals <- bind_cols(lapply(boot.plt.mats, "[", "pr_normal"))
+    ci_normals <- apply(as.matrix(pr_normals), 1, quantile, probs=c(0.025,0.975)) %>% 
+      # apply(as.matrix(pr_deliriums), 1, function(x){mean(x)+c(-1.96,1.96)*sd(x)/sqrt(length(x))})
+      t() %>% 
+      as.data.frame()
+    names(ci_normals) <- c("normal.ci.lo", "normal.ci.up")
+    
+    pr_deliriums <- bind_cols(lapply(boot.plt.mats, "[", "pr_delirium"))
+    ci_deliriums <- apply(as.matrix(pr_deliriums), 1, quantile, probs=c(0.025,0.975)) %>% 
+      t() %>% 
+      as.data.frame()
+    names(ci_deliriums) <- c("delirium.ci.lo", "delirium.ci.up")
+    
+    pr_comas <- bind_cols(lapply(boot.plt.mats, "[", "pr_coma"))
+    ci_comas <- apply(as.matrix(pr_comas), 1, quantile, probs=c(0.025,0.975)) %>% 
+      t() %>% 
+      as.data.frame()
+    names(ci_comas) <- c("coma.ci.lo", "coma.ci.up")
+    
+    pr_deli_norms <- bind_cols(lapply(boot.plt.mats, "[", "pr_deli_norm"))
+    ci_deli_norms <- apply(as.matrix(pr_deli_norms), 1, quantile, probs=c(0.025,0.975)) %>% 
+      t() %>% 
+      as.data.frame()
+    names(ci_deli_norms) <- c("deli_norm.ci.lo", "deli_norm.ci.up")
+    
+    plt.mat <- cbind(data.plt.mat, ci_normals, ci_deliriums, ci_comas, ci_deli_norms)
+    
+    # save tmp results for boot & plt
+    tmp.res <- list(use.dat=use.dat, marker=marker, dat.pred=dat.pred,
+                    data.plt.mat=data.plt.mat, boot.plt.mats=boot.plt.mats,
+                    plt.mat=plt.mat)
+    saveRDS(tmp.res, file=paste0("results/plt_boot/marker_", marker.out, ".rds"))
+    message("Save boot results for ", marker.out)
+    
+  } else {
+    tmp.res <- readRDS(paste0("results/plt_boot/marker_", marker.out, ".rds"))
+    plt.mat <- tmp.res$plt.mat
+  }
+  
+  
+  # plot for each scenario
+  q1 <- quantile(use.dat[[marker]],probs=0.1,na.rm=T)
+  q3 <- quantile(use.dat[[marker]],probs=0.9,na.rm=T)
+  # for rug plot - limit to 10%-90% marker
+  dat.rug <- use.dat %>% 
+    filter(q1<=!!as.symbol(marker) & !!as.symbol(marker)<=q3)
+                                       
+  stopifnot(length(unique(plt.mat$scenario)) == 6)
+  for (i in 1:length(unique(plt.mat$scenario))) {
+    if (i == 1) {
+      plt_name <- "day 1; male; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 2) {
+      plt_name <- "day 1; female; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 3) {
+      plt_name <- "day 3; male; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 4) {
+      plt_name <- "day 3; female; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 5) {
+      plt_name <- "day 5; male; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 6) {
+      plt_name <- "day 5; female; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    }
+    
+    
+    plt_size <- 0.1
+    if (marker=="isop") {
+      marker_title <- "F2-Isoprostanes (pg/mL)"
+    } else if (marker=="mtdna") {
+      marker_title <- "Cell-free mitochondrial DNA (pmol/L)"
+    }
+    
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_delirium, color="delirium")) +
+      geom_point(aes(y=delirium.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=delirium.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("delirium","ci.lo","ci.up"),
+                          values = c("deeppink2","hotpink","hotpink")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +
+      ylim(0, 1) +
+      xlab(marker_title) +
+      ylab("Probability of delirium") -> g1
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_coma, color="coma")) +
+      geom_point(aes(y=coma.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=coma.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("coma","ci.lo","ci.up"),
+                          values = c("blue","royalblue2","royalblue2")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +#legend.position="top"
+      ylim(0, 1) +
+      xlab(marker_title) +
+      ylab("Probability of coma") -> g2
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_normal, color="normal")) +
+      geom_point(aes(y=normal.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=normal.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("normal","ci.lo","ci.up"),
+                          values = c("green3","seagreen2","seagreen2")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +
+      ylim(0, 1) +
+      xlab(marker_title) +
+      ylab("Probability of normal") -> g3
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_deli_norm, color="deli_norm")) +
+      geom_point(aes(y=deli_norm.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=deli_norm.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("deli_norm","ci.lo","ci.up"),
+                          values = c("red","indianred2","indianred2")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +
+      ylim(0.25, 4) +
+      xlab(marker_title) + 
+      ylab("Odds of delirium if not in coma") -> g4
+    
+    gg <- g2 | g4
+    gg <- gg + 
+      plot_annotation(title = paste0("Coma+Odds - ", plt_name))
+    print(gg)
+    
+    g <- g1 | g3
+    g <- g +
+      plot_annotation(title = paste0("Delirium+Normal - ", plt_name))
+    print(g)
+  } # end plot
+  
+  cat("========================\n")
+} # end marker
+```
+
+
+#### Model with SOFA interaction terms [2021-08-26]
+
+As to the interaction between SOFA score and markers, create a binary outcome variable by split the SOFA at this medium.
+Then create new variables for the basis functions on the markers (instead of calling the
+natural cubic spline in the multinomial model), another set of new variables as the interaction between the binary SOFA status and those new variables.
+Then fit the multinomial logistic regression model with repeated measures.
+
+```{r}
+sofa.median <- median(daily.dat$sofa.mod)
+daily.dat2 <- daily.dat %>% 
+  mutate(sofa.bin = ifelse(sofa.mod >= sofa.median, 1, 0)) %>% 
+  dplyr::select(id, study.day, mental.stat.num, 
+                age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.bin,
+                isop)
+
+knot.loc <- rcspline.eval(daily.dat2[["isop"]], nk=3, knots.only=T)
+isop_sp <- rcspline.eval(daily.dat2[["isop"]], knots=knot.loc, inclx=F)
+
+use.dat <- cbind(daily.dat2, isop_sp) %>% 
+  mutate(isop_sofa = sofa.bin * isop,
+         isop_sofa_sp = sofa.bin * isop_sp,
+         sofa.bin = factor(sofa.bin))
+
+fml <- as.formula(paste("mental.stat.num ~ isop + isop_sp + sofa.bin +
+                      isop_sofa + isop_sofa_sp +
+                      factor(study.day) +
+                      age.enroll + sex.pp + charlson.score + iqcode.cat.e"))
+
+mul.fit <- nomLORgee(formula = fml, data = use.dat, id = id)
+smry <- summary(mul.fit)
+print(smry$coefficients)
+```
+
+
+
+### Patient characteristics in mtDNA model [2021-12-16]
+
+- Patient characteristics of the BRAIN-ICU cohort included in the mtDNA model.
+
+```{r}
+daily.dat2 <- brainmind.daily %>% 
+  left_join(brainmind.fu, by="id") %>% 
+  # filter(ever.sevseptic.s == "Had severe sepsis in ICU") %>% 
+  filter(fu.period %in% c("3 Month")) %>% #, "12 Month"
+  left_join(brainmind.oneobs, by="id") %>% 
+  left_join(mtdna.data, by=c("id", "study.day")) %>% 
+  left_join(f2.data, by=c("id","study.day")) %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  distinct(id, study.day, .keep_all=TRUE) %>%  # 8 subjects have multiple records on 1 day
+  mutate(mental.stat.num = case_when(mental.stat.imp=="Delirious" ~ 1,
+                                     mental.stat.imp=="Comatose" ~ 2,
+                                     mental.stat.imp=="Normal" ~ 3),
+         mental.stat.num = as.integer(mental.stat.num)) %>% 
+  dplyr::select(id, study.day, mental.stat.num, mental.stat.imp, is_outlier,
+                mtdna, isop, isof, isop.qc, isof.qc, isof.isop.ratio, isof.isop.ratio.qc,
+                age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod,
+                il6.imp, sofa, race.wb,
+                ever.del.s.imp, ever.coma.s.imp,
+                del.s.imp.eo, coma.s.imp.eo,
+                rbans.global.score, rbans.global.cat
+                ) %>% 
+  group_by(id) %>% 
+  mutate(is_outlier = mean(is_outlier, na.rm=T)) %>% 
+  ungroup()
+
+
+pat_mtdna <- daily.dat2 %>% 
+  filter(!is.na(mental.stat.num)) %>% 
+  filter(!is.na(mtdna)) %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(-c(is_outlier,id,study.day,mental.stat.num,mental.stat.imp,sofa.mod,il6.imp,iqcode.cat.e,
+                   mtdna,isop,isof,isop.qc,isof.qc,isof.isop.ratio,isof.isop.ratio.qc))
+  
+tab <- CreateTableOne(data = pat_mtdna)
+nonnorm_vars <- c("age.enroll","charlson.score","sofa",
+                  "del.s.imp.eo","coma.s.imp.eo","rbans.global.score")
+print(tab, nonnormal = nonnorm_vars, formatOptions = list(big.mark = ","))
+```
+
+### Patient characteristics in isop model [2021-12-16]
+
+- Patient characteristics of the BRAIN-ICU cohort included in the isop model.
+
+```{r}
+pat_isop <- daily.dat2 %>% 
+  filter(!is.na(mental.stat.num)) %>% 
+  filter(!is.na(isop)) %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(-c(is_outlier,id,study.day,mental.stat.num,mental.stat.imp,sofa.mod,il6.imp,iqcode.cat.e,
+                   mtdna,isop,isof,isop.qc,isof.qc,isof.isop.ratio,isof.isop.ratio.qc))
+  
+tab <- CreateTableOne(data = pat_isop)
+nonnorm_vars <- c("age.enroll","charlson.score","sofa",
+                  "del.s.imp.eo","coma.s.imp.eo","rbans.global.score")
+print(tab, nonnormal = nonnorm_vars, formatOptions = list(big.mark = ","))
+```
+
+### Using biomarker today to predict mental status tomorrow [2022-01-20]
+
+`beta10`: delirious vs. normal. `beta20`: comatose vs. normal.
+
+```{r}
+markers <- c("mtdna", "isop")
+
+dat135 <- brainmind.daily %>% 
+  dplyr::select(id, study.day, mental.stat.imp, il6.imp) %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  mutate(study.day=as.numeric(study.day))
+
+dat246 <- brainmind.daily %>% 
+  dplyr::select(id, study.day, mental.stat.imp) %>% 
+  filter(study.day %in% c(2,4,6)) %>% 
+  rename(study.day.next = study.day,
+         mental.stat.imp.next = mental.stat.imp) %>% 
+  mutate(study.day = study.day.next-1) %>% 
+  mutate(study.day=as.numeric(study.day))
+
+dat123456 <- dat135 %>% 
+  full_join(dat246, by=c("id","study.day")) %>% 
+  mutate(study.day = as.integer(study.day))
+Hmisc::label(dat123456$study.day) <- "Study day"
+
+# daily-level data (include day 123456 for mental status)
+daily.dat.next <- dat123456 %>% 
+  left_join(brainmind.oneobs, by="id") %>% 
+  left_join(mtdna.data, by=c("id", "study.day")) %>% 
+  left_join(f2.data, by=c("id","study.day")) %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  distinct(id, study.day, .keep_all=TRUE) %>%  # 8 subjects have multiple records on 1 day
+  mutate(mental.stat.num = case_when(mental.stat.imp=="Delirious" ~ 1,
+                                     mental.stat.imp=="Comatose" ~ 2,
+                                     mental.stat.imp=="Normal" ~ 3),
+         mental.stat.num = factor(mental.stat.num),
+         mental.stat.num.next = case_when(mental.stat.imp.next=="Delirious" ~ 1,
+                                     mental.stat.imp.next=="Comatose" ~ 2,
+                                     mental.stat.imp.next=="Normal" ~ 3),
+         mental.stat.num.next = as.integer(mental.stat.num.next),
+         ) %>% 
+  dplyr::select(id, study.day, mental.stat.num, mental.stat.num.next,mental.stat.imp,
+                mtdna, isop, isof, isop.qc, isof.qc, isof.isop.ratio, isof.isop.ratio.qc,
+                age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod,
+                il6.imp, sofa, race.wb
+                )
+```
+
+```{r}
+## tune
+is_boot <- FALSE#TRUE#
+
+## bootstrap: patient-level resample
+if (is_boot) {
+  B <- 200
+  n_pats <- length(unique(daily.dat.next$id))  # 1040pats*3days == 3120records = nrow(daily.dat)
+  # n_pats.no.outlier <- daily.dat.next %>% 
+  #   filter(is_outlier == 0) %>% 
+  #   dplyr::select(id) %>% 
+  #   unique() %>% 
+  #   nrow()
+  boot.dats.all <- list()
+  # boot.dats.no.outlier <- list()
+  for (b in 1:B) {
+    ## all pats (for mtDNA & markers)
+    set.seed(b)
+    boot.dats.all[[b]] <- daily.dat.next %>% 
+      group_by(id) %>% 
+      sample_n_groups(n_pats, replace=T) %>% 
+      ungroup() %>% 
+      arrange(study.day) %>% 
+      mutate(id = rep(seq(1, n_pats), times=3)) %>%  # new id because duplicates
+      arrange(id, study.day) %>% 
+      relocate(id)  # move this col to front
+    
+    ## pats w/o outliers (for mtDNA-no-outlier only)
+    # set.seed(b)
+    # boot.dats.no.outlier[[b]] <- daily.dat.next %>% 
+    #   filter(is_outlier == 0) %>%  # remove outliers
+    #   group_by(id) %>% 
+    #   sample_n_groups(n_pats.no.outlier, replace=T) %>% 
+    #   ungroup() %>% 
+    #   arrange(study.day) %>% 
+    #   mutate(id = rep(seq(1, n_pats.no.outlier), times=3)) %>%
+    #   arrange(id, study.day) %>% 
+    #   relocate(id)
+  }
+}
+
+
+################################################################################
+
+## wrapper for predict nomLORgee
+PredLORgeeInner.next <- function(use.dat, marker, dat.pred, is.print) {
+  if (marker == "isop") { # only rcs(isop) is sig.
+    fml <- as.formula(paste("mental.stat.num.next ~ rcs(", marker, ", 3) + 
+                      factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod")) #mental.stat.imp + 
+  } else {
+    fml <- as.formula(paste("mental.stat.num.next ~ ", marker, " + 
+                      factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod")) #mental.stat.imp + 
+  }
+  
+  use.dat1 <- use.dat %>% 
+    na.omit()
+  
+  # outcome categories 1,...,J (J is reference group - normal)
+  mul.fit <- nomLORgee(formula = fml, data = use.dat1, id = id)
+  smry <- summary(mul.fit)
+  if (is.print) {
+    print(smry$coefficients)
+  }
+  
+  fml0 <- as.formula("mental.stat.num.next ~ factor(study.day) +
+                      age.enroll + sex.pp + charlson.score +
+                      iqcode.cat.e + sofa.mod")
+  mul.fit0 <- update(mul.fit, formula = fml0)
+  if (is.print) {
+    cat("Global Wald Test of Nested GEE Models for marker terms\n")
+    print(waldts(mul.fit, mul.fit0))
+  }
+  
+  ## predict prob log(OR)=Xb
+  # design matrix
+  if (marker == "isop") { # obtain knot locations & design matrix for rcs
+    knot.loc <- rcspline.eval(use.dat[[marker]], nk=3, knots.only=TRUE)
+    X <- model.matrix( ~ rcspline.eval(exposure, knots=knot.loc, inclx=TRUE) + 
+                         factor(study.day) +
+                         age.enroll + sex.pp + charlson.score +
+                         iqcode.cat.e + sofa.mod, dat.pred)
+  } else {
+    X <- model.matrix( ~., dat.pred)
+  }
+  
+  # coef
+  coef <- mul.fit$coefficients
+  coef_1 <- coef[1:(length(mul.fit$coefficients)/2)]
+  coef_2 <- coef[(length(mul.fit$coefficients)/2+1):length(mul.fit$coefficients)]
+  
+  or_1 <- exp(X %*% coef_1)  # delirious vs. normal
+  or_2 <- exp(X %*% coef_2)  # coma vs. normal
+  
+  pred.out <- as.data.frame(cbind(1, or_1, or_2))
+  names(pred.out) <- c("pr_normal", "pr_delirium", "pr_coma")
+  pred.out <- pred.out %>% 
+    mutate(pr_sum = pr_normal + pr_delirium + pr_coma,
+           pr_normal = pr_normal / pr_sum,
+           pr_delirium = pr_delirium / pr_sum,
+           pr_coma = pr_coma / pr_sum,
+           pr_deli_norm = pr_delirium / pr_normal) %>% 
+    dplyr::select(-pr_sum)
+  
+  # create scenario id from group_by
+  plt.mat <- cbind(dat.pred, pred.out) %>% 
+    group_by(study.day, age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod) %>% 
+    { mutate(ungroup(.), scenario = group_indices(.)) } %>% 
+    dplyr::select(exposure, scenario, pr_normal, pr_delirium, pr_coma, pr_deli_norm)
+  
+  return(plt.mat)
+}
+
+################################################################################
+############################### Main program ###################################
+################################################################################
+
+markers <- c("mtdna", "isop") #, "mtdna-no-outliers", "isof", "isop.qc", "isof.qc", "isof.isop.ratio", "isof.isop.ratio.qc"
+
+for (marker in markers) {
+  # marker <- "mtdna"
+  cat(marker, ":\n")
+  
+  marker.out <- marker
+  use.dat <- daily.dat.next
+  if (is_boot) {
+    boot.dats <- boot.dats.all
+  }
+  
+  # data for prediction
+  dat.pred <- expand.grid(exposure=seq(quantile(use.dat[[marker]],probs=0.1,na.rm=T), 
+                                       quantile(use.dat[[marker]],probs=0.9,na.rm=T),
+                                       length.out=200),
+                          study.day=unique(use.dat$study.day), 
+                          age.enroll=median(use.dat$age.enroll),
+                          sex.pp=unique(use.dat$sex.pp), 
+                          charlson.score=median(use.dat$charlson.score),
+                          iqcode.cat.e=getmode(use.dat$iqcode.cat.e),
+                          sofa.mod=median(use.dat$sofa.mod)
+                          ) %>% 
+    mutate(study.day = factor(study.day),
+           sex.pp = factor(sex.pp, levels=levels(use.dat$sex.pp)),
+           iqcode.cat.e = factor(iqcode.cat.e, levels=levels(use.dat$iqcode.cat.e))
+           )
+  
+  # data estimate
+  data.plt.mat <- PredLORgeeInner.next(use.dat=use.dat, marker=marker, 
+                                  dat.pred=dat.pred, is.print=TRUE)
+  
+  # data estimate (isop with il6.imp)
+  # if (marker == "isop") { # only rcs(isop) is sig.
+  #   fml1 <- as.formula(paste("mental.stat.num ~ rcs(", marker, ", 3) + 
+  #                     rcs(il6.imp,3) +
+  #                     factor(study.day) +
+  #                     age.enroll + sex.pp + charlson.score +
+  #                     iqcode.cat.e + sofa.mod"))
+  #   fml2 <- as.formula(paste("mental.stat.num ~  
+  #                     rcs(il6.imp,3) +
+  #                     factor(study.day) +
+  #                     age.enroll + sex.pp + charlson.score +
+  #                     iqcode.cat.e + sofa.mod"))
+  #   use.dat1 <- use.dat %>% 
+  #     na.omit()
+  #   print("isop + il6")
+  #   mul.fit <- nomLORgee(formula = fml1, data = use.dat1, id = id)
+  #   smry <- summary(mul.fit)
+  #   print(smry$coefficients)
+  #   
+  #   print("il6 alone")
+  #   mul.fit <- nomLORgee(formula = fml2, data = use.dat1, id = id)
+  #   smry <- summary(mul.fit)
+  #   print(smry$coefficients)
+  # }
+  
+  
+  # boot estimate
+  if (is_boot) {
+    boot.plt.mats <- lapply(boot.dats, function(boot.dat, marker, dat.pred) {
+      PredLORgeeInner.next(use.dat=boot.dat, marker=marker, 
+                      dat.pred=dat.pred, is.print=FALSE)
+    }, marker=marker, dat.pred=dat.pred)
+    
+    # # check all columns of a are identical
+    # a <- bind_cols(lapply(boot.plt.mats, "[", "exposure"))
+    # stopifnot(length(unique(as.list(a))) == 1)
+    
+    pr_normals <- bind_cols(lapply(boot.plt.mats, "[", "pr_normal"))
+    ci_normals <- apply(as.matrix(pr_normals), 1, quantile, probs=c(0.025,0.975)) %>% 
+      # apply(as.matrix(pr_deliriums), 1, function(x){mean(x)+c(-1.96,1.96)*sd(x)/sqrt(length(x))})
+      t() %>% 
+      as.data.frame()
+    names(ci_normals) <- c("normal.ci.lo", "normal.ci.up")
+    
+    pr_deliriums <- bind_cols(lapply(boot.plt.mats, "[", "pr_delirium"))
+    ci_deliriums <- apply(as.matrix(pr_deliriums), 1, quantile, probs=c(0.025,0.975)) %>% 
+      t() %>% 
+      as.data.frame()
+    names(ci_deliriums) <- c("delirium.ci.lo", "delirium.ci.up")
+    
+    pr_comas <- bind_cols(lapply(boot.plt.mats, "[", "pr_coma"))
+    ci_comas <- apply(as.matrix(pr_comas), 1, quantile, probs=c(0.025,0.975)) %>% 
+      t() %>% 
+      as.data.frame()
+    names(ci_comas) <- c("coma.ci.lo", "coma.ci.up")
+    
+    pr_deli_norms <- bind_cols(lapply(boot.plt.mats, "[", "pr_deli_norm"))
+    ci_deli_norms <- apply(as.matrix(pr_deli_norms), 1, quantile, probs=c(0.025,0.975)) %>% 
+      t() %>% 
+      as.data.frame()
+    names(ci_deli_norms) <- c("deli_norm.ci.lo", "deli_norm.ci.up")
+    
+    plt.mat <- cbind(data.plt.mat, ci_normals, ci_deliriums, ci_comas, ci_deli_norms)
+    
+    # save tmp results for boot & plt
+    tmp.res <- list(use.dat=use.dat, marker=marker, dat.pred=dat.pred,
+                    data.plt.mat=data.plt.mat, boot.plt.mats=boot.plt.mats,
+                    plt.mat=plt.mat)
+    saveRDS(tmp.res, file=paste0("results/plt_boot/marker_", marker.out, "_next.rds"))
+    message("Save boot results for ", marker.out)
+    
+  } else {
+    tmp.res <- readRDS(paste0("results/plt_boot/marker_", marker.out, "_next.rds"))
+    plt.mat <- tmp.res$plt.mat
+  }
+  
+  
+  # plot for each scenario
+  q1 <- quantile(use.dat[[marker]],probs=0.1,na.rm=T)
+  q3 <- quantile(use.dat[[marker]],probs=0.9,na.rm=T)
+  # for rug plot - limit to 10%-90% marker
+  dat.rug <- use.dat %>% 
+    filter(q1<=!!as.symbol(marker) & !!as.symbol(marker)<=q3)
+                                       
+  stopifnot(length(unique(plt.mat$scenario)) == 6)
+  for (i in 1:length(unique(plt.mat$scenario))) {
+    if (i == 1) {
+      plt_name <- "day 1; male; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 2) {
+      plt_name <- "day 1; female; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 3) {
+      plt_name <- "day 3; male; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 4) {
+      plt_name <- "day 3; female; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 5) {
+      plt_name <- "day 5; male; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    } else if (i == 6) {
+      plt_name <- "day 5; female; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    }
+    
+    plt_size <- 0.1
+    if (marker=="isop") {
+      marker_title <- "F2-Isoprostanes (pg/mL)"
+    } else if (marker=="mtdna") {
+      marker_title <- "Cell-free mitochondrial DNA (pmol/L)"
+    }
+    
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_delirium, color="delirium")) +
+      geom_point(aes(y=delirium.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=delirium.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("delirium","ci.lo","ci.up"),
+                          values = c("deeppink2","hotpink","hotpink")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +
+      ylim(0, 1) +
+      xlab(marker_title) +
+      ylab("Probability of delirium") -> g1
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_coma, color="coma")) +
+      geom_point(aes(y=coma.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=coma.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("coma","ci.lo","ci.up"),
+                          values = c("blue","royalblue2","royalblue2")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +#legend.position="top"
+      ylim(0, 1) +
+      xlab(marker_title) +
+      ylab("Probability of coma") -> g2
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_normal, color="normal")) +
+      geom_point(aes(y=normal.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=normal.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("normal","ci.lo","ci.up"),
+                          values = c("green3","seagreen2","seagreen2")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +
+      ylim(0, 1) +
+      xlab(marker_title) +
+      ylab("Probability of normal") -> g3
+    plt.mat %>% 
+      filter(scenario == i) %>% 
+      ggplot(aes(x=exposure)) +
+      geom_point(aes(y=pr_deli_norm, color="deli_norm")) +
+      geom_point(aes(y=deli_norm.ci.lo, color="ci.lo"), size=plt_size) +
+      geom_point(aes(y=deli_norm.ci.up, color="ci.up"), size=plt_size) +
+      scale_colour_manual("",
+                          breaks = c("deli_norm","ci.lo","ci.up"),
+                          values = c("red","indianred2","indianred2")) +
+      # geom_rug(data=dat.rug, aes(x=!!as.symbol(marker)), inherit.aes = F, sides="b") +
+      theme_bw() +
+      theme(legend.position="none") +
+      ylim(0.25, 4) +
+      xlab(marker_title) + 
+      ylab("Odds of delirium if not in coma") -> g4
+    
+    gg <- g2 | g4
+    gg <- gg + 
+      plot_annotation(title = paste0("Coma+Odds - ", plt_name))
+    print(gg)
+    
+    g <- g1 | g3
+    g <- g +
+      plot_annotation(title = paste0("Delirium+Normal - ", plt_name))
+    print(g)
+  } # end plot
+  
+  cat("========================\n")
+} # end marker
+```
+
+
+### Model (marker vs. # normal days) [2022-01-27]
+
+- Exposure: mean/max isop
+- Outcome: # normal days within 5/14/30 days (`dcfd.5.imp`/`dcfd.14.imp`/`dcfd.s.imp`), i.e. Delirium/coma-free days within first 5/14/30 days (imputed)
+- Covariates: age, sex, iqcode, sofa.mod
+- Distribution of # normal days within 14 days
+- Model selection among Poisson (poi), Negative Binomial (nb), Zero-inflated Poisson (zip), Zero-inflated Negative Binomial (zinb) using AIC and BIC
+
+```{r}
+mean.max.marker <- mtdna.data %>% 
+  full_join(f2.data, by=c("id", "study.day")) %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  distinct(id, study.day, .keep_all=TRUE) %>% 
+  group_by(id) %>% 
+  summarise(mean.isop = mean(isop, na.rm=T),
+         mean.mtdna = mean(mtdna, na.rm=T),
+         max.isop = max(isop, na.rm=T),
+         max.mtdna = max(mtdna, na.rm=T)) %>% 
+  ungroup()
+
+dat.dcfd <- mean.max.marker %>% 
+  left_join(brainmind.oneobs, by="id") %>% 
+  dplyr::select(id, mean.mtdna, mean.isop,max.mtdna,max.isop,
+                dcfd.5.imp,dcfd.14.imp,dcfd.s.imp,
+                age.enroll,sex.pp,charlson.score,iqcode.cat.e,sofa.mod)
+
+
+hist(dat.dcfd$dcfd.5.imp)
+hist(dat.dcfd$dcfd.14.imp)
+hist(dat.dcfd$dcfd.s.imp)
+```
+
+#### Within 5 days
+
+```{r}
+sum.markers <- c("mean.isop","max.isop","mean.mtdna","max.mtdna")
+#replace Inf with NA
+usemat <- do.call(data.frame,lapply(dat.dcfd, function(x) replace(x, is.infinite(x),NA)))
+for (sum.marker in sum.markers) {
+  cat("marker:", sum.marker, "\n")
+  
+  fml <- as.formula(paste0("dcfd.5.imp ~ ",sum.marker,
+                         "+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod"))
+  
+  # cat("\nPoisson model\n")
+  mp <- glm(fml, data=usemat, family=poisson(link="log"))
+  # print(round(coef(summary(mp)),3))
+  
+  # cat("\nNegative binomial model\n")
+  mnb <- MASS::glm.nb(fml, data=usemat)
+  # print(round(coef(summary(mnb)),3))
+  
+  # cat("ZIP\n")
+  mzip <- pscl::zeroinfl(fml, data=usemat)
+  # print(summary(mzip))
+
+  # cat("ZINB\n")
+  mzinb <- pscl::zeroinfl(fml, data=usemat, dist="negbin")
+  # print(summary(mzinb))
+
+  cat("Model comparison in terms of AIC and deviance\n")
+  print(c("AIC",poi=round(AIC(mp)), nb=round(AIC(mnb)), zip=round(AIC(mzip)), zinb=round(AIC(mzinb))))
+  print(c("BIC",poi=round(BIC(mp)), nb=round(BIC(mnb)), zip=round(BIC(mzip)), zinb=round(BIC(mzinb))))
+  # print(c("Deviance",poi=round(deviance(mp)), nb=round(deviance(mnb))))#, zip=round(deviance(mzip)), zinb=round(deviance(mzinb))))
+  cat("=============================================\n")
+}
+```
+
+ZINB (zero-inflated negative binomial) models
+
+```{r}
+for (sum.marker in sum.markers) {
+  cat("marker:", sum.marker, "\n")
+  
+  fml <- as.formula(paste0("dcfd.5.imp ~ ",sum.marker,
+                         "+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod"))
+
+  # cat("ZINB\n")
+  mzinb <- pscl::zeroinfl(fml, data=usemat, dist="negbin")
+  print(summary(mzinb))
+
+  # cat("Model comparison in terms of AIC and deviance\n")
+  # print(c("AIC",poi=round(AIC(mp)), nb=round(AIC(mnb)), zip=round(AIC(mzip)), zinb=round(AIC(mzinb))))
+  # print(c("BIC",poi=round(BIC(mp)), nb=round(BIC(mnb)), zip=round(BIC(mzip)), zinb=round(BIC(mzinb))))
+  # print(c("Deviance",poi=round(deviance(mp)), nb=round(deviance(mnb))))#, zip=round(deviance(mzip)), zinb=round(deviance(mzinb))))
+  cat("=============================================\n")
+}
+
+```
+
+#### Within 14 days
+
+```{r}
+sum.markers <- c("mean.isop","max.isop","mean.mtdna","max.mtdna")
+#replace Inf with NA
+usemat <- do.call(data.frame,lapply(dat.dcfd, function(x) replace(x, is.infinite(x),NA)))
+for (sum.marker in sum.markers) {
+  cat("marker:", sum.marker, "\n")
+  
+  fml <- as.formula(paste0("dcfd.14.imp ~ ",sum.marker,
+                         "+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod"))
+  
+  # cat("\nPoisson model\n")
+  mp <- glm(fml, data=usemat, family=poisson(link="log"))
+  # print(round(coef(summary(mp)),3))
+  
+  # cat("\nNegative binomial model\n")
+  mnb <- MASS::glm.nb(fml, data=usemat)
+  # print(round(coef(summary(mnb)),3))
+  
+  # cat("ZIP\n")
+  mzip <- pscl::zeroinfl(fml, data=usemat)
+  # print(summary(mzip))
+
+  # cat("ZINB\n")
+  mzinb <- pscl::zeroinfl(fml, data=usemat, dist="negbin")
+  # print(summary(mzinb))
+
+  cat("Model comparison in terms of AIC and deviance\n")
+  print(c("AIC",poi=round(AIC(mp)), nb=round(AIC(mnb)), zip=round(AIC(mzip)), zinb=round(AIC(mzinb))))
+  print(c("BIC",poi=round(BIC(mp)), nb=round(BIC(mnb)), zip=round(BIC(mzip)), zinb=round(BIC(mzinb))))
+  # print(c("Deviance",poi=round(deviance(mp)), nb=round(deviance(mnb))))#, zip=round(deviance(mzip)), zinb=round(deviance(mzinb))))
+  cat("=============================================\n")
+}
+```
+
+ZINB (zero-inflated negative binomial) models
+
+```{r}
+for (sum.marker in sum.markers) {
+  cat("marker:", sum.marker, "\n")
+  
+  fml <- as.formula(paste0("dcfd.14.imp ~ ",sum.marker,
+                         "+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod"))
+
+  # cat("ZINB\n")
+  mzinb <- pscl::zeroinfl(fml, data=usemat, dist="negbin")
+  print(summary(mzinb))
+
+  # cat("Model comparison in terms of AIC and deviance\n")
+  # print(c("AIC",poi=round(AIC(mp)), nb=round(AIC(mnb)), zip=round(AIC(mzip)), zinb=round(AIC(mzinb))))
+  # print(c("BIC",poi=round(BIC(mp)), nb=round(BIC(mnb)), zip=round(BIC(mzip)), zinb=round(BIC(mzinb))))
+  # print(c("Deviance",poi=round(deviance(mp)), nb=round(deviance(mnb))))#, zip=round(deviance(mzip)), zinb=round(deviance(mzinb))))
+  cat("=============================================\n")
+}
+
+```
+
+#### Within study period
+
+```{r}
+sum.markers <- c("mean.isop","max.isop","mean.mtdna","max.mtdna")
+#replace Inf with NA
+usemat <- do.call(data.frame,lapply(dat.dcfd, function(x) replace(x, is.infinite(x),NA)))
+for (sum.marker in sum.markers) {
+  cat("marker:", sum.marker, "\n")
+  
+  fml <- as.formula(paste0("dcfd.s.imp ~ ",sum.marker,
+                         "+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod"))
+  
+  # cat("\nPoisson model\n")
+  mp <- glm(fml, data=usemat, family=poisson(link="log"))
+  # print(round(coef(summary(mp)),3))
+  
+  # cat("\nNegative binomial model\n")
+  mnb <- MASS::glm.nb(fml, data=usemat)
+  # print(round(coef(summary(mnb)),3))
+  
+  # cat("ZIP\n")
+  mzip <- pscl::zeroinfl(fml, data=usemat)
+  # print(summary(mzip))
+
+  # cat("ZINB\n")
+  mzinb <- pscl::zeroinfl(fml, data=usemat, dist="negbin")
+  # print(summary(mzinb))
+
+  cat("Model comparison in terms of AIC and deviance\n")
+  print(c("AIC",poi=round(AIC(mp)), nb=round(AIC(mnb)), zip=round(AIC(mzip)), zinb=round(AIC(mzinb))))
+  print(c("BIC",poi=round(BIC(mp)), nb=round(BIC(mnb)), zip=round(BIC(mzip)), zinb=round(BIC(mzinb))))
+  # print(c("Deviance",poi=round(deviance(mp)), nb=round(deviance(mnb))))#, zip=round(deviance(mzip)), zinb=round(deviance(mzinb))))
+  cat("=============================================\n")
+}
+```
+
+ZINB (zero-inflated negative binomial) models
+
+```{r}
+for (sum.marker in sum.markers) {
+  cat("marker:", sum.marker, "\n")
+  
+  fml <- as.formula(paste0("dcfd.s.imp ~ ",sum.marker,
+                         "+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod"))
+
+  # cat("ZINB\n")
+  mzinb <- pscl::zeroinfl(fml, data=usemat, dist="negbin")
+  print(summary(mzinb))
+
+  # cat("Model comparison in terms of AIC and deviance\n")
+  # print(c("AIC",poi=round(AIC(mp)), nb=round(AIC(mnb)), zip=round(AIC(mzip)), zinb=round(AIC(mzinb))))
+  # print(c("BIC",poi=round(BIC(mp)), nb=round(BIC(mnb)), zip=round(BIC(mzip)), zinb=round(BIC(mzinb))))
+  # print(c("Deviance",poi=round(deviance(mp)), nb=round(deviance(mnb))))#, zip=round(deviance(mzip)), zinb=round(deviance(mzinb))))
+  cat("=============================================\n")
+}
+
+```
+
+
+### Survival analysis [2022-02-03]
+
+```{r}
+mean.max.marker <- mtdna.data %>% 
+  full_join(f2.data, by=c("id", "study.day")) %>% 
+  filter(study.day %in% c(1,3,5)) %>% 
+  distinct(id, study.day, .keep_all=TRUE) %>% 
+  group_by(id) %>% 
+  summarise(mean.isop = mean(isop, na.rm=T),
+         mean.mtdna = mean(mtdna, na.rm=T),
+         max.isop = max(isop, na.rm=T),
+         max.mtdna = max(mtdna, na.rm=T)) %>% 
+  ungroup()
+
+cat("Among all patients:\n")
+surv_dat30 <- brainmind.oneobs %>% 
+  # dplyr::select(id,contains("died"),contains("death")) %>% 
+  dplyr::select(id,died.study.30,time.deathlast.inhosp.s,
+                age.enroll,sex.pp,charlson.score,iqcode.cat.e,sofa.mod) %>% 
+  left_join(mean.max.marker, by="id") %>% 
+  mutate(died.study.30=ifelse(died.study.30=="Alive through first 30 days",0,1))
+
+cat("mean.isop:\n")
+cox <- coxph(Surv(time.deathlast.inhosp.s, died.study.30) ~ mean.isop+
+               age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod,
+             data=surv_dat30)
+summary(cox)
+
+cat("mean.mtdna:\n")
+cox <- coxph(Surv(time.deathlast.inhosp.s, died.study.30) ~ mean.mtdna+
+               age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod,
+             data=surv_dat30)
+summary(cox)
+
+cat("Among patients who were alive at least the first 5 days:\n")
+surv_dat30_alive5days <- surv_dat30 %>% 
+  filter(time.deathlast.inhosp.s>5) %>% 
+  mutate(time.deathlast.inhosp.s = time.deathlast.inhosp.s-5)
+
+cat("mean.isop:\n")
+cox <- coxph(Surv(time.deathlast.inhosp.s, died.study.30) ~ mean.isop+
+               age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod,
+             data=surv_dat30_alive5days)
+summary(cox)
+
+cat("mean.mtdna:\n")
+cox <- coxph(Surv(time.deathlast.inhosp.s, died.study.30) ~ mean.mtdna+
+               age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod,
+             data=surv_dat30_alive5days)
+summary(cox)
+```
+
+
+## Models 5 and 6 (F2-IsoP and long-term cognitive impairment)
+
+- Hypothesis: Higher mean F2-isoprostane (F2-IsoP) predicts lower cognitive scores in sepsis survivors.
+- Unit of observation: Subject
+- Exposure: Mean / Slope F2-IsoP concentration (using results from study days 1, 3, and 5)
+- Outcome: RBANS global cognition score at 3 months (model 5) and 12 months (model 6)
+- Covariates: (a) age, (b) gender, (c) Charlson comorbidity index, (d) Short IQCODE, (e) modified SOFA score, 
+- Model: Multiple linear regression with inverse probability of attrition weighting
+- Implementation steps:
+  (1) use “ever.sevseptic.s” of the data “One Obs” to identify the set of patients at baseline (or patients who ever had sepsis during the study period). 
+  (2) use “fu.period” in the data “FU” to identify the occasion of consideration: 3 month and 12 month. “rbans.global.score” is the outcome score. Use the availability of 3-month or 12-month Rbans score (yes vs no) and baseline variables to construct propensity score (just use logistic regression model for this purpose). Then run inverse probability weighted regression model to assess the effect of markers on 3-month Rbans and 12-month Rbans, respectively.
+
+```{r}
+### Create mean & slope for day 1/3/5 for mtDNA and 6 markers
+
+################################################################################
+
+## mtDNA
+mtdna.data.oneobs <- mtdna.data %>% 
+  # mean
+  group_by(id) %>% 
+  mutate(mtdna.mean = mean(mtdna, na.rm=TRUE)) %>% 
+  ungroup()
+
+mtdna.slope.dat <- mtdna.data.oneobs %>% 
+  # slope
+  group_by(id) %>%
+  do(tidy(lm(mtdna ~ study.day, data = .))) %>%
+  filter(term == "study.day") %>%
+  dplyr::select(id, mtdna.slope=estimate)
+
+mtdna.data.oneobs <- mtdna.data.oneobs %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(id, mtdna.mean) %>% 
+  left_join(mtdna.slope.dat, by="id")
+
+################################################################################
+
+## F2
+f2.data.oneobs <- f2.data %>% 
+  # mean
+  group_by(id) %>% 
+  mutate(isop.mean = mean(isop, na.rm=TRUE)#,
+         # isof.mean = mean(isof, na.rm=TRUE),
+         # isop.qc.mean = mean(isop.qc, na.rm=TRUE),
+         # isof.qc.mean = mean(isof.qc, na.rm=TRUE),
+         # isof.isop.ratio.mean = mean(isof.isop.ratio, na.rm=TRUE),
+         # isof.isop.ratio.qc.mean = mean(isof.isop.ratio.qc, na.rm=TRUE),
+         ) %>% 
+  ungroup()
+
+isop.slope.dat <- f2.data.oneobs %>% 
+  # slope
+  group_by(id) %>%
+  do(tidy(lm(isop ~ study.day, data = .))) %>%
+  filter(term == "study.day") %>%
+  dplyr::select(id, isop.slope=estimate)
+
+# isof.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.slope=estimate)
+
+# isop.qc.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isop.qc ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isop.qc.slope=estimate)
+
+# isof.qc.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof.qc ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.qc.slope=estimate)
+
+# isof.isop.ratio.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof.isop.ratio ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.isop.ratio.slope=estimate)
+
+# isof.isop.ratio.qc.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof.isop.ratio.qc ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.isop.ratio.qc.slope=estimate)
+
+f2.data.oneobs <- f2.data.oneobs %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(id, isop.mean#, 
+                # isof.mean, 
+                # isop.qc.mean, isof.qc.mean, 
+                # isof.isop.ratio.mean, isof.isop.ratio.qc.mean
+                ) %>% 
+  left_join(isop.slope.dat, by="id") #%>% 
+  # left_join(isof.slope.dat, by="id") %>% 
+  # left_join(isop.qc.slope.dat, by="id") %>% 
+  # left_join(isof.qc.slope.dat, by="id") %>% 
+  # left_join(isof.isop.ratio.slope.dat, by="id") %>% 
+  # left_join(isof.isop.ratio.qc.slope.dat, by="id")
+
+################################################################################
+
+mtdna.f2.oneobs <- mtdna.data.oneobs %>% 
+  left_join(f2.data.oneobs, by="id")
+
+# remove data not needed
+rm(mtdna.data.oneobs, mtdna.slope.dat,
+   f2.data.oneobs, isop.slope.dat#, 
+   # isof.slope.dat, 
+   # isop.qc.slope.dat, isof.qc.slope.dat, 
+   # isof.isop.ratio.slope.dat, isof.isop.ratio.qc.slope.dat
+   )
+```
+
+```{r}
+### Create RBANS + mtDNA/markers data (patient-level)
+rbans.oneobs.mat <- brainmind.oneobs %>% 
+  left_join(brainmind.fu, by="id") %>% 
+  filter(ever.sevseptic.s == "Had severe sepsis in ICU") %>% 
+  filter(fu.period %in% c("3 Month", "12 Month")) %>% 
+  dplyr::select(id, fu.period, rbans.global.score, 
+                age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod,
+                ever.del.s.imp, ever.coma.s.imp,
+                del.s.imp.eo, coma.s.imp.eo,
+                rbans.global.cat, sofa, race.wb
+                ) %>% 
+  left_join(mtdna.f2.oneobs, by="id") %>% 
+  mutate(rbans.3mon = ifelse(fu.period=="3 Month"&!is.na(rbans.global.score), 1, 0),
+         rbans.12mon = ifelse(fu.period=="12 Month"&!is.na(rbans.global.score), 1, 0))
+
+cat("Patient in RBANS but not in mtDNA:\n")
+sum(!(unique(rbans.oneobs.mat$id) %in% unique(mtdna.data$id)))
+cat("Patient in mtDNA but not in RBANS:\n")
+sum(!(unique(mtdna.data$id) %in% unique(rbans.oneobs.mat$id)))
+```
+
+
+### Mean isop as the exposure [2021-08-12]
+
+```{r}
+for (mon in c("3 Month", "12 Month")) {
+  rbans.mon <- rbans.oneobs.mat %>% 
+    filter(fu.period == mon)
+  
+  # ps model (logit glm)
+  cat("Propensity score model for", mon,"\n")
+  if (mon == "3 Month") {
+    ps.fit <- glm(rbans.3mon ~ rcs(isop.mean,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  } else if (mon == "12 Month") {
+    ps.fit <- glm(rbans.12mon ~ rcs(isop.mean,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.12mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  }
+  print(summary(ps.fit))
+  
+  # outcome model (glm)
+  cat("Outcome model for", mon,"\n")
+  or.fit <- glm(rbans.global.score ~ rcs(isop.mean,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                      data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(summary(or.fit))
+  
+  cat("========================\n")
+}
+```
+
+### Slope isop as the exposure [2021-09-09]
+
+```{r}
+for (mon in c("3 Month", "12 Month")) {
+  rbans.mon <- rbans.oneobs.mat %>% 
+    filter(fu.period == mon)
+  
+  # ps model (logit glm)
+  cat("Propensity score model for", mon,"\n")
+  if (mon == "3 Month") {
+    ps.fit <- glm(rbans.3mon ~ rcs(isop.slope,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  } else if (mon == "12 Month") {
+    ps.fit <- glm(rbans.12mon ~ rcs(isop.slope,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.12mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  }
+  print(summary(ps.fit))
+  cat("========================\n")
+  
+  # outcome model (glm)
+  cat("Outcome model for", mon,"\n")
+  or.fit <- glm(rbans.global.score ~ rcs(isop.slope,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                      data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(summary(or.fit))
+  
+  cat("========================\n")
+  cat("global test for slope terms:\n")
+  or.fit2 <- glm(rbans.global.score ~ age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                 data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(anova(or.fit, or.fit2, test="Chisq"))
+  
+  
+  cat("\n========================\n")
+  cat("========================\n")
+}
+```
+
+
+#### Visualization for 3-month Rbans vs. isop slope
+
+- Plots for 3-month Rbans vs. isop slope [2021-09-09]
+- Plots for change in 3-month Rbans from the median vs. isop slope [2021-10-21]
+
+```{r}
+rbans.mon <- rbans.oneobs.mat %>% 
+  filter(fu.period == "3 Month") %>% 
+  dplyr::select(id, rbans.global.score, rbans.3mon, isop.slope, 
+                age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod)
+
+knot.loc <- rcspline.eval(rbans.mon[["isop.slope"]], nk=3, knots.only=TRUE)
+rbans.mon$isop.slope.sp <- rcspline.eval(rbans.mon[["isop.slope"]], knots=knot.loc, inclx=FALSE)
+
+# median isop slope for reference
+median_isop_slope <- median(rbans.mon$isop.slope, na.rm=T)
+
+# data for prediction
+dat.pred <- expand.grid(isop.slope=c(median_isop_slope, # add median into the grid
+                                     seq(quantile(rbans.mon[["isop.slope"]],probs=0.25,na.rm=T), 
+                                         quantile(rbans.mon[["isop.slope"]],probs=0.75,na.rm=T), 
+                                         length.out=200)),
+                        rbans.3mon=1,#c(0,1), 
+                        age.enroll=median(rbans.mon$age.enroll),
+                        sex.pp=unique(rbans.mon$sex.pp), 
+                        charlson.score=median(rbans.mon$charlson.score),
+                        iqcode.cat.e=getmode(rbans.mon$iqcode.cat.e),
+                        sofa.mod=median(rbans.mon$sofa.mod)) %>% 
+  mutate(sex.pp = factor(sex.pp, levels=levels(rbans.mon$sex.pp)),
+         iqcode.cat.e = factor(iqcode.cat.e, levels=levels(rbans.mon$iqcode.cat.e))
+  )
+dat.pred$isop.slope.sp <- rcspline.eval(dat.pred[["isop.slope"]], knots=knot.loc, inclx=FALSE)
+
+## tune
+is_boot <- FALSE
+
+## bootstrap: patient-level resample
+if (is_boot) {
+  B <- 500
+  n_pats <- length(unique(rbans.mon$id))  # 573 pats
+  boot.dats.all <- list()
+  for (b in 1:B) {
+    set.seed(b)
+    boot.dats.all[[b]] <- rbans.mon %>% 
+      sample_n(n_pats, replace=TRUE)
+  }
+}
+
+
+PredIsopSlopeInner <- function (rbans.mon, dat.pred, median_isop_slope) {
+  # ps model
+  ps.fit <- glm(rbans.3mon ~ isop.slope + isop.slope.sp + 
+                  age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                data=rbans.mon, family=binomial)
+  rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+  rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  
+  # outcome model
+  or.fit <- glm(rbans.global.score ~ isop.slope + isop.slope.sp + 
+                  age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                data=rbans.mon, weights=rbans.wt, family=gaussian)
+  
+  # fit ps & outcome
+  dat.pred$rbans.ps <- predict(ps.fit, dat.pred, type="response")  # ps score
+  dat.pred$rbans.wt <- with(dat.pred, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  dat.pred$rbans.hat <- predict(or.fit, dat.pred, weights=rbans.wt)
+  
+  # create scenario id from group_by (4 scenarios)
+  plt.mat <- dat.pred %>% 
+    group_by(rbans.3mon, age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod) %>% 
+    mutate(diff_rbans = rbans.hat - rbans.hat[isop.slope == median_isop_slope]) %>% 
+    { mutate(ungroup(.), scenario = group_indices(.)) } %>% 
+    mutate(scenario = factor(scenario))
+  
+  return(plt.mat)
+}
+
+# data estimate
+data.plt.mat <- PredIsopSlopeInner(rbans.mon=rbans.mon, dat.pred=dat.pred, median_isop_slope=median_isop_slope)
+# boot estimate
+if (is_boot) {
+  boot.plt.mats <- lapply(boot.dats.all, function(boot.dat, dat.pred, median_isop_slope) {
+    PredIsopSlopeInner(rbans.mon=boot.dat, dat.pred=dat.pred, median_isop_slope=median_isop_slope)
+  }, dat.pred=dat.pred, median_isop_slope=median_isop_slope)
+    
+    # # check all columns of a are identical
+    # a <- bind_cols(lapply(boot.plt.mats, "[", "exposure"))
+    # stopifnot(length(unique(as.list(a))) == 1)
+    
+    # boot CI for rbans.hat
+    boot_rbans <- bind_cols(lapply(boot.plt.mats, "[", "rbans.hat"))
+    ci_rbans <- apply(as.matrix(boot_rbans), 1, quantile, probs=c(0.025,0.975)) %>% 
+      # apply(as.matrix(pr_deliriums), 1, function(x){mean(x)+c(-1.96,1.96)*sd(x)/sqrt(length(x))})
+      t() %>% 
+      as.data.frame()
+    names(ci_rbans) <- c("rbans.ci.lo", "rbans.ci.up")
+    
+    # boot CI for diff_rbans
+    boot_rbans <- bind_cols(lapply(boot.plt.mats, "[", "diff_rbans"))
+    ci_rbans_diff <- apply(as.matrix(boot_rbans), 1, quantile, probs=c(0.025,0.975)) %>% 
+      # apply(as.matrix(pr_deliriums), 1, function(x){mean(x)+c(-1.96,1.96)*sd(x)/sqrt(length(x))})
+      t() %>% 
+      as.data.frame()
+    names(ci_rbans_diff) <- c("rbans.diff.ci.lo", "rbans.diff.ci.up")
+    
+    # df for plot
+    plt.mat <- cbind(data.plt.mat, ci_rbans, ci_rbans_diff)
+    
+    # save tmp results for boot & plt
+    tmp.res <- list(B=B, rbans.mon=rbans.mon, dat.pred=dat.pred,
+                    median_isop_slope=median_isop_slope,
+                    data.plt.mat=data.plt.mat, plt.mat=plt.mat,
+                    boot_rbans=boot_rbans, boot.plt.mats=boot.plt.mats,
+                    ci_rbans=ci_rbans, ci_rbans_diff=ci_rbans_diff)
+    saveRDS(tmp.res, file=paste0("results/plt_boot/model5&6_boot_isop_slope.rds"))
+    message("Save boot results for isop slope in Model 5&6")
+    
+  } else {
+    tmp.res <- readRDS(paste0("results/plt_boot/model5&6_boot_isop_slope.rds"))
+    plt.mat <- tmp.res$plt.mat
+  }
+
+
+# plot for each scenario (rbans.hat)
+stopifnot(length(unique(plt.mat$scenario)) == 2)
+for (i in 1:2) {
+  if (i == 1) {
+    plt_name <- "Scenario 1: male; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    color <- "red"
+    color1 <- "darkred"
+  } else if (i == 2) {
+    plt_name <- "Scenario 2: female; age 62.38; charlson 2; iqcode not impaired; sofa 6"
+    color <- "blue"
+    color1 <- "darkblue"
+  }
+  
+  plt.mat %>% 
+    filter(scenario == i) %>% 
+    ggplot(aes(x=isop.slope)) +#, group=scenario, color=scenario)) +
+    geom_point(aes(y=rbans.hat, color="rbans.hat")) +
+    geom_point(aes(y=rbans.ci.lo, color="ci.lo")) +
+    geom_point(aes(y=rbans.ci.up, color="ci.up")) +
+    scale_colour_manual("",
+                        breaks = c("rbans.hat","ci.lo","ci.up"),
+                        values = c(color,color1,color1)) +
+    theme(legend.position="top") +
+    xlab("isop.slope") +
+    ylab("RBANS") +
+    ggtitle(plt_name) -> g
+  
+  print(g)
+}
+
+
+# plot for each scenario (diff_rbans)
+plt.mat %>% 
+  # filter(scenario == i) %>% 
+  ggplot(aes(x=isop.slope)) +#, group=scenario, color=scenario)) +
+  geom_point(aes(y=diff_rbans, color="diff_rbans")) +
+  # geom_point(aes(y=rbans.diff.ci.lo, color="ci.lo")) +
+  # geom_point(aes(y=rbans.diff.ci.up, color="ci.up")) +
+  # scale_colour_manual("",
+  #                     breaks = c("diff_rbans","ci.lo","ci.up"),
+  #                     values = c(color,color1,color1)) +
+  scale_colour_manual("",
+                      breaks = c("diff_rbans"),
+                      values = c(color)) +
+  # theme(legend.position="top") +
+  xlab("isop.slope") +
+  ylab("Change in RBANS from the median") +
+  ggtitle("Change in RBANS from the median") -> g
+
+print(g)
+```
+
+
+### Mean mtDNA as the exposure [2021-11-04]
+
+```{r}
+for (mon in c("3 Month", "12 Month")) {
+  rbans.mon <- rbans.oneobs.mat %>% 
+    filter(fu.period == mon)
+  
+  # ps model (logit glm)
+  cat("Propensity score model for", mon,"\n")
+  if (mon == "3 Month") {
+    ps.fit <- glm(rbans.3mon ~ mtdna.mean+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  } else if (mon == "12 Month") {
+    ps.fit <- glm(rbans.12mon ~ mtdna.mean+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.12mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  }
+  print(summary(ps.fit))
+  
+  # outcome model (glm)
+  cat("Outcome model for", mon,"\n")
+  or.fit <- glm(rbans.global.score ~ mtdna.mean+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                      data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(summary(or.fit))
+  
+  cat("========================\n")
+}
+```
+
+
+### Slope mtDNA as the exposure [2021-11-04]
+
+```{r}
+for (mon in c("3 Month", "12 Month")) {
+  rbans.mon <- rbans.oneobs.mat %>% 
+    filter(fu.period == mon)
+  
+  # ps model (logit glm)
+  cat("Propensity score model for", mon,"\n")
+  if (mon == "3 Month") {
+    ps.fit <- glm(rbans.3mon ~ mtdna.slope+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  } else if (mon == "12 Month") {
+    ps.fit <- glm(rbans.12mon ~ mtdna.slope+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.12mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  }
+  print(summary(ps.fit))
+  cat("========================\n")
+  
+  # outcome model (glm)
+  cat("Outcome model for", mon,"\n")
+  or.fit <- glm(rbans.global.score ~ mtdna.slope+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                      data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(summary(or.fit))
+  
+  cat("========================\n")
+  cat("global test for slope terms:\n")
+  or.fit2 <- glm(rbans.global.score ~ age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                 data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(anova(or.fit, or.fit2, test="Chisq"))
+  
+  
+  cat("\n========================\n")
+  cat("========================\n")
+}
+```
+
+### Patient characteristics in mtDNA model [2021-12-16]
+
+- 3 month RBANS
+
+```{r}
+# model: 3month rban & mean mtdna
+mon <- "3 Month"
+rbans.tmp <- rbans.oneobs.mat %>% 
+  filter(fu.period == mon) %>% 
+  filter(!is.na(rbans.global.score)) %>% 
+  filter(!is.na(mtdna.mean)) %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(-c(id,fu.period,sofa.mod,
+                   mtdna.slope,isop.mean,isop.slope,mtdna.mean,
+                   rbans.3mon,rbans.12mon)
+    )
+
+cat("3 Month RBANS & mean mtdna")
+tab <- CreateTableOne(data = rbans.tmp)
+nonnorm_vars <- c("age.enroll","charlson.score","sofa","rbans.global.score",
+                  "ever.del.s.imp","ever.coma.s.imp")
+print(tab, nonnormal = nonnorm_vars, formatOptions = list(big.mark = ","))
+```
+
+### Patient characteristics in isop model [2021-12-16]
+
+- 3 month RBANS
+
+```{r}
+# model: 3month rban & mean isop
+mon <- "3 Month"
+rbans.tmp <- rbans.oneobs.mat %>% 
+  filter(fu.period == mon) %>% 
+  filter(!is.na(rbans.global.score)) %>% 
+  filter(!is.na(isop.mean)) %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(-c(id,fu.period,sofa.mod,
+                   mtdna.slope,isop.mean,isop.slope,mtdna.mean,
+                   rbans.3mon,rbans.12mon)
+    )
+
+cat("3 Month RBANS & mean isop")
+tab <- CreateTableOne(data = rbans.tmp)
+nonnorm_vars <- c("age.enroll","charlson.score","sofa","rbans.global.score",
+                  "ever.del.s.imp","ever.coma.s.imp")
+print(tab, nonnormal = nonnorm_vars, formatOptions = list(big.mark = ","))
+```
+
+
+### Model 5 and 6 (log marker version) [2021-11-11]
+
+```{r}
+### Create mean & slope for day 1/3/5 for mtDNA and 6 markers
+
+################################################################################
+
+## mtDNA
+mtdna.data.oneobs <- mtdna.data %>% 
+  # mean
+  group_by(id) %>% 
+  mutate(mtdna.mean = mean(log(mtdna), na.rm=TRUE)) %>% 
+  ungroup()
+
+mtdna.slope.dat <- mtdna.data.oneobs %>% 
+  # slope
+  group_by(id) %>%
+  do(tidy(lm(log(mtdna) ~ study.day, data = .))) %>%
+  filter(term == "study.day") %>%
+  dplyr::select(id, mtdna.slope=estimate)
+
+mtdna.data.oneobs <- mtdna.data.oneobs %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(id, mtdna.mean) %>% 
+  left_join(mtdna.slope.dat, by="id")
+
+################################################################################
+
+## F2
+f2.data.oneobs <- f2.data %>% 
+  # mean
+  group_by(id) %>% 
+  mutate(isop.mean = mean(log(isop), na.rm=TRUE)#,
+         # isof.mean = mean(isof, na.rm=TRUE),
+         # isop.qc.mean = mean(isop.qc, na.rm=TRUE),
+         # isof.qc.mean = mean(isof.qc, na.rm=TRUE),
+         # isof.isop.ratio.mean = mean(isof.isop.ratio, na.rm=TRUE),
+         # isof.isop.ratio.qc.mean = mean(isof.isop.ratio.qc, na.rm=TRUE),
+         ) %>% 
+  ungroup()
+
+isop.slope.dat <- f2.data.oneobs %>% 
+  # slope
+  group_by(id) %>%
+  do(tidy(lm(log(isop) ~ study.day, data = .))) %>%
+  filter(term == "study.day") %>%
+  dplyr::select(id, isop.slope=estimate)
+
+# isof.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.slope=estimate)
+# 
+# isop.qc.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isop.qc ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isop.qc.slope=estimate)
+# 
+# isof.qc.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof.qc ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.qc.slope=estimate)
+# 
+# isof.isop.ratio.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof.isop.ratio ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.isop.ratio.slope=estimate)
+# 
+# isof.isop.ratio.qc.slope.dat <- f2.data.oneobs %>% 
+#   # slope
+#   group_by(id) %>%
+#   do(tidy(lm(isof.isop.ratio.qc ~ study.day, data = .))) %>%
+#   filter(term == "study.day") %>%
+#   dplyr::select(id, isof.isop.ratio.qc.slope=estimate)
+
+f2.data.oneobs <- f2.data.oneobs %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(id, isop.mean#, 
+                # isof.mean, 
+                # isop.qc.mean, isof.qc.mean, 
+                # isof.isop.ratio.mean, isof.isop.ratio.qc.mean
+                ) %>% 
+  left_join(isop.slope.dat, by="id") #%>% 
+  # left_join(isof.slope.dat, by="id") %>% 
+  # left_join(isop.qc.slope.dat, by="id") %>% 
+  # left_join(isof.qc.slope.dat, by="id") %>% 
+  # left_join(isof.isop.ratio.slope.dat, by="id") %>% 
+  # left_join(isof.isop.ratio.qc.slope.dat, by="id")
+
+################################################################################
+
+mtdna.f2.oneobs <- mtdna.data.oneobs %>% 
+  left_join(f2.data.oneobs, by="id")
+
+# remove data not needed
+rm(mtdna.data.oneobs, mtdna.slope.dat,
+   f2.data.oneobs, isop.slope.dat#, 
+   # isof.slope.dat, 
+   # isop.qc.slope.dat, isof.qc.slope.dat, 
+   # isof.isop.ratio.slope.dat, isof.isop.ratio.qc.slope.dat
+   )
+```
+
+```{r}
+### Create RBANS + mtDNA/markers data (patient-level)
+rbans.oneobs.mat <- brainmind.oneobs %>% 
+  left_join(brainmind.fu, by="id") %>% 
+  filter(ever.sevseptic.s == "Had severe sepsis in ICU") %>% 
+  filter(fu.period %in% c("3 Month", "12 Month")) %>% 
+  dplyr::select(id, fu.period, rbans.global.score, 
+                age.enroll, sex.pp, charlson.score, iqcode.cat.e, sofa.mod) %>% 
+  left_join(mtdna.f2.oneobs, by="id") %>% 
+  mutate(rbans.3mon = ifelse(fu.period=="3 Month"&!is.na(rbans.global.score), 1, 0),
+         rbans.12mon = ifelse(fu.period=="12 Month"&!is.na(rbans.global.score), 1, 0))
+
+cat("Patient in RBANS but not in mtDNA:\n")
+sum(!(unique(rbans.oneobs.mat$id) %in% unique(mtdna.data$id)))
+cat("Patient in mtDNA but not in RBANS:\n")
+sum(!(unique(mtdna.data$id) %in% unique(rbans.oneobs.mat$id)))
+```
+
+
+#### Mean isop as the exposure [2021-08-12]
+
+```{r}
+for (mon in c("3 Month", "12 Month")) {
+  rbans.mon <- rbans.oneobs.mat %>% 
+    filter(fu.period == mon)
+  
+  # ps model (logit glm)
+  cat("Propensity score model for", mon,"\n")
+  if (mon == "3 Month") {
+    ps.fit <- glm(rbans.3mon ~ rcs(isop.mean,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  } else if (mon == "12 Month") {
+    ps.fit <- glm(rbans.12mon ~ rcs(isop.mean,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.12mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  }
+  print(summary(ps.fit))
+  
+  # outcome model (glm)
+  cat("Outcome model for", mon,"\n")
+  or.fit <- glm(rbans.global.score ~ rcs(isop.mean,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                      data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(summary(or.fit))
+  
+  cat("========================\n")
+}
+```
+
+#### Slope isop as the exposure [2021-09-09]
+
+```{r}
+for (mon in c("3 Month", "12 Month")) {
+  rbans.mon <- rbans.oneobs.mat %>% 
+    filter(fu.period == mon)
+  
+  # ps model (logit glm)
+  cat("Propensity score model for", mon,"\n")
+  if (mon == "3 Month") {
+    ps.fit <- glm(rbans.3mon ~ rcs(isop.slope,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.3mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  } else if (mon == "12 Month") {
+    ps.fit <- glm(rbans.12mon ~ rcs(isop.slope,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                     data=rbans.mon, family=binomial)
+    rbans.mon$rbans.ps <- predict(ps.fit, rbans.mon, type="response")  # ps score
+    rbans.mon$rbans.wt <- with(rbans.mon, ifelse(rbans.12mon==1, 1/rbans.ps, 1/(1-rbans.ps)))
+  }
+  print(summary(ps.fit))
+  cat("========================\n")
+  
+  # outcome model (glm)
+  cat("Outcome model for", mon,"\n")
+  or.fit <- glm(rbans.global.score ~ rcs(isop.slope,3)+age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                      data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(summary(or.fit))
+  
+  cat("========================\n")
+  cat("global test for slope terms:\n")
+  or.fit2 <- glm(rbans.global.score ~ age.enroll+sex.pp+charlson.score+iqcode.cat.e+sofa.mod, 
+                 data=rbans.mon, weights=rbans.wt, family=gaussian)
+  print(anova(or.fit, or.fit2, test="Chisq"))
+  
+  
+  cat("\n========================\n")
+  cat("========================\n")
+}
+```
+
+
