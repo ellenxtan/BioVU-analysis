@@ -1,0 +1,139 @@
+Name,Description
+grid,grid ID
+gender,gender
+dob,date of birth
+ethnicity,ethnicity
+haplogroup,haplogroup
+race,race
+dod,date of death
+dod_determine,how date of death was determined
+deceased,deceased or not
+adm_date,admission date
+dc_date,discharge date
+sofa_worst,worst sofa in an encounter
+dt,today's date
+status.today,CAM status today
+adm_id,admission id
+bilirubin,bilirubin level
+sofa_liver,liver sofa score
+creatinine,creatinine level
+sofa_renal,renal sofa score
+platelet,platelet level
+sofa_coagulation,coagulation sofa score
+rass,rass score
+sofa_cns,cns sofa score
+map,map
+pressor,pressor
+sofa_cardio,cardiovascular sofa score
+pf_ratio,PF ratio
+sf_ratio,SF ratio
+vent,ventilation
+sofa_respiration,respiration sofa score
+sofa,sofa score
+data_type,data type
+cam_yn,CAM (yes or no)
+rass_yn,RASS (yes or no)
+cam_next,CAM status next day
+icu_start_date,ICU start date
+icu_last_date,ICU end date
+rhee_old,old definition of rhee
+rhee_new,new definition of rhee
+dementia_raw,raw dementia
+dementia_adm,dementia status at admission
+EIscore_prev,EI score based on all previous history
+Alcohol_abuse,alcohol abuse or not
+Blood_Loss_Anemia,blood loss anemia or not
+Cardiac_arhythmias,cardiac arhythmias or not
+Chronic_Pulmonary_Disease,Chronic Pulmonary Disease or not
+Coagulopathy,Coagulopathy or not
+Congestive_heart_failure,Congestive heart failure or not
+Deficiency_Anemia,Deficiency Anemia or not
+Depression,Depression or not
+Diabetes_Complicated,Diabetes Complicated or not
+Diabetes_Uncomplicated,Diabetes Uncomplicated or not
+Drug_Abuse,Drug Abuse or not
+Fluid_electrolyte_disorder,Fluid electrolyte disorder or not
+HIV,HIV or not
+Hypertension_Complicated,Hypertension Complicated or not
+Hypertension_Uncomplicated,Hypertension Uncomplicated or not
+Hypothyroid,Hypothyroid or not
+Liver_Disease,Liver Disease or not
+Lymphoma,Lymphoma or not
+Metastatic_Cancer,Metastatic Cancer or not
+Obesity,Obesity or not
+Other_Neuro_Disorders,Other Neuro Disorders or not
+Paralysis,Paralysis or not
+Peptic_Ulcer_wo_bleed,Peptic Ulcer without bleed or not
+Peripheral_Vascular_Disease,Peripheral Vascular Disease or not
+Psychoses,Psychoses or not
+Pulminary_circ_dis,Pulminary circ disease or not
+RA,RA or not
+Renal_Failure,Renal Failure or not
+Tumor,Tumor or not
+Valvular_Disease,Valvular Disease or not
+Weight_Loss,Weight Loss or not
+EIscore_1yr,EI score based on previous one year
+benzo,benzo or not
+dexmedetomidine,dexmedetomidine or not
+opiate,opiate or not
+propofol,propofol or not
+icd9_code,ICD-9 code of neuro disease
+icd9_neuro,"whether had neuro disease based on ICD-9 code (1: yes, 0: no)"
+icd10_code,ICD-10 code of neuro disease
+icd10_neuro,"whether had neuro disease based on ICD-10 code (1: yes, 0: no)"
+neuro_yn,neuro disease (yes or no)
+female,female or not
+age_adm,age at admission
+stay_duration,duration of stay (from admission date to discharge date)
+pressor_bin,"pressor imputed (1: yes, 0: missing)"
+bilirubin_bin,"bilirubin imputed (1: yes, 0: missing)"
+diff_2EIscores,difference between the two EI scores
+neuro_days,days of having neuro disorder within an encounter
+num_days,num of days within an encounter
+unknown_days,"days within an encounter that had an unknown status (Unknown: RASS only, Unknown: conflicting CAM, No CAM or RASS)"
+unknown_prop,proportion of unknown days within an encounter
+status.today_new,daily CAM status (imputed)
+sofa_liver_new,daily liver sofa (imputed)
+sofa_cardio_new,daily cardiovascular sofa (imputed only for cases where there is a single missing day)
+sofa_coagul_new,daily coagulation sofa (imputed only for cases where there is a single missing day)
+sofa_renal_new,daily renal sofa (imputed only for cases where there is a single missing day)
+status.pre,daily CAM status yesterday (imputed)
+benzo.pre,benzo or not yesterday
+opiate.pre,opiate or not yesterday
+propofol.pre,propofol or not yesterday
+dex.pre,dexmedetomidine or not yesterday
+num_icu_days,num of ICU days within an encounter
+na_cnt_cardio,num of missing for raw cardiovascular sofa score
+na_cnt_coagul,num of missing for raw coagulation sofa score
+na_cnt_renal,num of missing for raw renal sofa score
+sofa_cardio_imp,daily cardiovascular sofa (imputed full)
+sofa_coagul_imp,daily coagulation sofa (imputed full)
+sofa_renal_imp,daily renal sofa (imputed full)
+sofa_new,total sofa score (imputed full)
+sofa_icu_start,total sofa score at ICU start day
+in_icu_death,death in ICU or not
+num_kn_days,days within an encounter that had a known status
+is_delirium,whether was delirium on that day
+is_coma,whether was coma on that day
+day_id,the i-th day in an encounter
+is_delirium_ever,whether had delirium within the first 14 days in an encounter
+is_coma_ever,whether had coma within the first 14 days in an encounter
+day_benzo,num of days had benzo within the first 14 days in an encounter
+day_opiate,num of days had opiate within the first 14 days in an encounter
+day_propofol,num of days had propofol within the first 14 days in an encounter
+day_dex,num of days had dex within the first 14 days in an encounter
+day_delirium,num of days had delirium within the first 14 days in an encounter
+day_coma,num of days had coma within the first 14 days in an encounter
+is_WhiteOther,whether haplogroup is WhiteOther
+is_H,whether haplogroup is H
+is_I,whether haplogroup is I
+is_W,whether haplogroup is W
+is_X,whether haplogroup is X
+is_J,whether haplogroup is J
+is_T,whether haplogroup is T
+is_UK,whether haplogroup is UK
+is_BlackOther,whether haplogroup is BlackOther
+is_L1,whether haplogroup is L1
+is_L2,whether haplogroup is L2
+is_L3,whether haplogroup is L3
+EIscore_prev_exc,EI score except Other_Neuro_Disease based on all previous history
